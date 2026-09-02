@@ -39,3 +39,57 @@ func TestResolvedUsesDirectNeo4jForGraphInput(t *testing.T) {
 		t.Fatalf("got mode %q emit %q", got.Mode, got.Emit)
 	}
 }
+
+func TestValidateGraphConfigAllowsAddressableValues(t *testing.T) {
+	for _, config := range []string{
+		"can://artifact/payments/codeanalyzer-iac.yaml",
+		"configs/production.yaml",
+	} {
+		t.Run(config, func(t *testing.T) {
+			err := (Options{
+				Inputs:        []string{"neo4j://localhost:7687"},
+				AppName:       "payments",
+				AnalysisLevel: 3,
+				Emit:          EmitAuto,
+				Config:        config,
+			}).Validate()
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestValidateGraphConfigRejectsNonAddressableValues(t *testing.T) {
+	for _, config := range []string{
+		"/tmp/codeanalyzer-iac.yaml",
+		"../codeanalyzer-iac.yaml",
+		"https://example.invalid/codeanalyzer-iac.yaml",
+		"can://iac/payments/codeanalyzer-iac.yaml",
+	} {
+		t.Run(config, func(t *testing.T) {
+			err := (Options{
+				Inputs:        []string{"neo4j://localhost:7687"},
+				AppName:       "payments",
+				AnalysisLevel: 3,
+				Emit:          EmitAuto,
+				Config:        config,
+			}).Validate()
+			if err == nil || !strings.Contains(err.Error(), "--config must be a can://artifact/... ID or safe app-relative path in graph mode") {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateLeavesFilesystemConfigForLaterValidation(t *testing.T) {
+	err := (Options{
+		Inputs:        []string{"charts/api"},
+		AnalysisLevel: 1,
+		Emit:          EmitAuto,
+		Config:        "/tmp/codeanalyzer-iac.yaml",
+	}).Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+}

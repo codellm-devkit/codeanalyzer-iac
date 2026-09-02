@@ -3,6 +3,8 @@ package options
 import (
 	"fmt"
 	"net/url"
+	"path"
+	"strings"
 )
 
 type InputMode string
@@ -89,6 +91,9 @@ func (o Options) Validate() error {
 		if o.WorkspaceRoot != "" {
 			return fmt.Errorf("--workspace-root is not supported in graph mode")
 		}
+		if o.Config != "" && !isGraphConfig(o.Config, o.AppName) {
+			return fmt.Errorf("--config must be a can://artifact/... ID or safe app-relative path in graph mode")
+		}
 	}
 
 	if o.AnalysisLevel < 1 || o.AnalysisLevel > 3 {
@@ -126,4 +131,29 @@ func isGraphURI(input string) bool {
 	default:
 		return false
 	}
+}
+
+func isGraphConfig(config, appName string) bool {
+	u, err := url.ParseRequestURI(config)
+	if err == nil && u.Scheme != "" {
+		if u.Scheme != "can" || u.Host != "artifact" || u.RawQuery != "" || u.Fragment != "" {
+			return false
+		}
+		prefix := "can://artifact/" + appName + "/"
+		return strings.HasPrefix(config, prefix) && isSafeRelativePath(strings.TrimPrefix(config, prefix))
+	}
+	return isSafeRelativePath(config)
+}
+
+func isSafeRelativePath(value string) bool {
+	decoded, err := url.PathUnescape(value)
+	if err != nil || decoded == "" || strings.HasPrefix(decoded, "/") || strings.Contains(decoded, "\\") {
+		return false
+	}
+	for _, segment := range strings.Split(decoded, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return decoded != "." && path.Clean(decoded) == decoded
 }

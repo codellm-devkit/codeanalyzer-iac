@@ -31,10 +31,10 @@ func New(version string, run Runner) *cobra.Command {
 			opts.Inputs = args
 			opts.AnalysisLevelSet = cmd.Flags().Changed("analysis-level")
 			applyNeo4jEnvironment(cmd, &opts)
+			opts = opts.Resolved()
 			if err := opts.Validate(); err != nil {
 				return err
 			}
-			opts = opts.Resolved()
 			return run.Run(cmd.Context(), opts)
 		},
 	}
