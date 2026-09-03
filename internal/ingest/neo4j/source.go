@@ -100,7 +100,7 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 				return ingest.Result{}, fmt.Errorf("Neo4j artifact ID escapes application prefix: %q", row.ID)
 			}
 			expectedID, err := model.ArtifactID(s.appName, row.Path)
-			if err != nil || row.ID != expectedID {
+			if strings.Contains(row.Path, "\\") || err != nil || row.ID != expectedID {
 				return ingest.Result{}, fmt.Errorf("Neo4j artifact ID/path relation is invalid: id=%q path=%q", row.ID, row.Path)
 			}
 			if _, exists := result.Artifacts[row.Path]; exists {
@@ -108,8 +108,8 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 			}
 
 			artifact := rawArtifact(row)
-			if source, ok := row.Source.(string); !ok || source == "" {
-				s.addDiagnostic(result.Diagnostics, "IAC_GRAPH_SOURCE_MISSING", row.Path, artifact.ID, "graph artifact source is missing or is not a non-empty string")
+			if source, ok := row.Source.(string); !ok {
+				s.addDiagnostic(result.Diagnostics, "IAC_GRAPH_SOURCE_MISSING", row.Path, artifact.ID, "graph artifact source is missing or is not a string")
 			} else if !matchesDigest(source, row.SHA256) {
 				s.addDiagnostic(result.Diagnostics, "IAC_GRAPH_SOURCE_HASH_MISMATCH", row.Path, artifact.ID, "graph artifact source sha256 does not match")
 			} else {
@@ -151,25 +151,7 @@ func artifactPrefix(appName string) string {
 }
 
 func (s *Source) configID() (string, error) {
-	if strings.HasPrefix(s.config, "can://") {
-		return s.config, nil
-	}
-	if !safeRelativePath(s.config) {
-		return "", fmt.Errorf("unsafe graph config path")
-	}
-	return model.ArtifactID(s.appName, s.config)
-}
-
-func safeRelativePath(value string) bool {
-	if value == "" || strings.ContainsAny(value, "\\\x00") || strings.HasPrefix(value, "/") {
-		return false
-	}
-	for _, segment := range strings.Split(value, "/") {
-		if segment == "" || segment == "." || segment == ".." {
-			return false
-		}
-	}
-	return true
+	return ingest.GraphConfigArtifactID(s.appName, s.config)
 }
 
 func rawArtifact(row ArtifactRow) *model.Artifact {

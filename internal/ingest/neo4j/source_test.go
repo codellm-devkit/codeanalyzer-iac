@@ -53,7 +53,7 @@ func TestLoadRejectsIneligibleSourceWithRawArtifactAndDiagnostic(t *testing.T) {
 		row  ArtifactRow
 		code string
 	}{
-		{name: "missing", row: graphRow(t, "missing.yaml", ""), code: "IAC_GRAPH_SOURCE_MISSING"},
+		{name: "missing", row: ArtifactRow{ID: artifactID(t, "missing.yaml"), Path: "missing.yaml", Format: "yaml", SHA256: validDigest}, code: "IAC_GRAPH_SOURCE_MISSING"},
 		{name: "non string", row: ArtifactRow{ID: artifactID(t, "non-string.yaml"), Path: "non-string.yaml", Format: "yaml", Source: []byte("not text"), SHA256: validDigest, SizeBytes: 8}, code: "IAC_GRAPH_SOURCE_MISSING"},
 		{name: "hash mismatch", row: ArtifactRow{ID: artifactID(t, "bad-hash.yaml"), Path: "bad-hash.yaml", Format: "yaml", Source: "actual: source\n", SHA256: validDigest, SizeBytes: 15}, code: "IAC_GRAPH_SOURCE_HASH_MISMATCH"},
 	} {
@@ -74,6 +74,26 @@ func TestLoadRejectsIneligibleSourceWithRawArtifactAndDiagnostic(t *testing.T) {
 				t.Fatalf("diagnostics = %#v", got.Diagnostics)
 			}
 		})
+	}
+}
+
+func TestLoadRetainsVerifiedEmptyStringSource(t *testing.T) {
+	row := graphRow(t, "empty.yaml", "")
+	queryer := &fakeQueryer{pages: [][]ArtifactRow{{row}, {}}}
+
+	got, err := New(queryer, "payments", 10).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := got.Artifacts[row.Path]
+	if artifact == nil || artifact.Source != "" || artifact.SHA256 != row.SHA256 || artifact.SizeBytes != 0 {
+		t.Fatalf("empty artifact = %#v", artifact)
+	}
+	if hasDiagnostic(got.Diagnostics, "IAC_GRAPH_SOURCE_MISSING", artifact.ID) || hasDiagnostic(got.Diagnostics, "IAC_GRAPH_SOURCE_HASH_MISMATCH", artifact.ID) {
+		t.Fatalf("verified empty source received diagnostics: %#v", got.Diagnostics)
+	}
+	if err := model.Validate(model.NewApplication("payments", got.Artifacts)); err != nil {
+		t.Fatalf("verified empty artifact must remain model-valid: %v", err)
 	}
 }
 
@@ -118,6 +138,17 @@ func TestLoadRejectsDuplicateAndMalformedRows(t *testing.T) {
 				t.Fatal("Load succeeded")
 			}
 		})
+	}
+}
+
+func TestLoadRejectsBackslashGraphPath(t *testing.T) {
+	row := graphRow(t, "charts/api/Chart.yaml", "apiVersion: v2\n")
+	row.Path = "charts\\api\\Chart.yaml"
+	queryer := &fakeQueryer{pages: [][]ArtifactRow{{row}, {}}}
+
+	_, err := New(queryer, "payments", 10).Load(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "ID/path relation") {
+		t.Fatalf("Load error = %v", err)
 	}
 }
 
@@ -179,6 +210,19 @@ func TestLoadSelectsConfigByIDOrRelativePath(t *testing.T) {
 				t.Fatal("selected config is not loaded")
 			}
 		})
+	}
+}
+
+func TestLoadDecodesGraphConfigSelectorExactlyOnce(t *testing.T) {
+	config := graphRow(t, "configs/my profile.yaml", "renders: []\n")
+	queryer := &fakeQueryer{pages: [][]ArtifactRow{{config}, {}}}
+
+	got, err := New(queryer, "payments", 10, "configs/my%20profile.yaml").Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Artifacts[config.Path] == nil {
+		t.Fatal("decoded config is not loaded")
 	}
 }
 

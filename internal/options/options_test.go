@@ -73,6 +73,19 @@ func TestValidateGraphConfigAcceptsEncodedApplicationArtifactID(t *testing.T) {
 	}
 }
 
+func TestValidateGraphConfigAcceptsPercentEncodedRelativePath(t *testing.T) {
+	err := (Options{
+		Inputs:        []string{"neo4j://localhost:7687"},
+		AppName:       "payments",
+		AnalysisLevel: 3,
+		Emit:          EmitAuto,
+		Config:        "configs/my%20profile.yaml",
+	}).Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateGraphConfigRejectsNonAddressableValues(t *testing.T) {
 	for _, config := range []string{
 		"/tmp/codeanalyzer-iac.yaml",

@@ -3,10 +3,8 @@ package options
 import (
 	"fmt"
 	"net/url"
-	"path"
-	"strings"
 
-	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
+	"github.com/codellm-devkit/codeanalyzer-iac/internal/ingest"
 )
 
 type InputMode string
@@ -136,43 +134,6 @@ func isGraphURI(input string) bool {
 }
 
 func isGraphConfig(config, appName string) bool {
-	u, err := url.ParseRequestURI(config)
-	if err == nil && u.Scheme != "" {
-		if u.Scheme != "can" || u.Host != "artifact" || u.RawQuery != "" || u.Fragment != "" {
-			return false
-		}
-		prefix, ok := graphArtifactPrefix(appName)
-		if !ok || !strings.HasPrefix(config, prefix) {
-			return false
-		}
-		relative, err := url.PathUnescape(strings.TrimPrefix(config, prefix))
-		if err != nil || !isSafeRelativePath(relative) {
-			return false
-		}
-		canonical, err := model.ArtifactID(appName, relative)
-		return err == nil && config == canonical
-	}
-	return isSafeRelativePath(config)
-}
-
-func graphArtifactPrefix(appName string) (string, bool) {
-	const marker = "_"
-	id, err := model.ArtifactID(appName, marker)
-	if err != nil {
-		return "", false
-	}
-	return strings.TrimSuffix(id, "/"+marker) + "/", true
-}
-
-func isSafeRelativePath(value string) bool {
-	decoded, err := url.PathUnescape(value)
-	if err != nil || decoded == "" || strings.HasPrefix(decoded, "/") || strings.Contains(decoded, "\\") {
-		return false
-	}
-	for _, segment := range strings.Split(decoded, "/") {
-		if segment == "." || segment == ".." {
-			return false
-		}
-	}
-	return decoded != "." && path.Clean(decoded) == decoded
+	_, err := ingest.GraphConfigArtifactID(appName, config)
+	return err == nil
 }
