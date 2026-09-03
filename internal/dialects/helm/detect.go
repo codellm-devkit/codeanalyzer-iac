@@ -54,11 +54,31 @@ func (frontend) Detect(artifactContext dialect.ArtifactContext) (dialect.Detecti
 	return detection, matched, err
 }
 
-func (frontend) Parse(ctx context.Context, _ *model.Artifact, _ dialect.Detection) (model.Delta, error) {
+func (frontend) Parse(ctx context.Context, artifact *model.Artifact, detection dialect.Detection) (model.Delta, error) {
 	if err := contextError(ctx); err != nil {
 		return model.Delta{}, err
 	}
-	return model.Delta{}, nil
+	if artifact == nil || artifact.Source == "" || detection.Dialect != "" && detection.Dialect != dialectName {
+		return model.Delta{}, nil
+	}
+	switch detection.Kind {
+	case "helm_chart":
+		return parseChart(artifact, detection), nil
+	case "helm_requirements":
+		return parseRequirements(artifact, detection), nil
+	case "helm_lock":
+		return parseLock(artifact, detection), nil
+	case "helm_values":
+		return parseValues(artifact, detection), nil
+	case "helm_values_schema":
+		return parseValuesSchema(artifact, detection), nil
+	case "helm_crd":
+		return parseCRD(artifact, detection).delta, nil
+	case "helm_ignore":
+		return parseIgnore(artifact, detection).delta, nil
+	default:
+		return model.Delta{}, nil
+	}
 }
 
 func (frontend) Resolve(ctx context.Context, _ *model.Application) (model.Delta, error) {

@@ -1,2 +1,5 @@
-.git
+# source order is significant
+.git/
+*.tmp
+!keep.tmp
 *.tgz
