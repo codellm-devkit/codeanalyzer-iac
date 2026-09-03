@@ -1,4 +1,28 @@
+# café deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "sample.fullname" . }}
+  labels:
+    first: {{ .Values.image.tag | quote }}
+    second: {{ required "tag" .Values.image.tag }}
+spec:
+  template:
+    spec:
+      containers:
+        - image: {{ (index .Values "image").repository }}:{{ index .Values "image" "tag" }}
+          dynamic: {{ index .Values.image .component }}
+---
+{{ if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "sample.name" . }}
+data:
+  rendered: {{ tpl "kind: ConfigMap" . }}
+  dynamic: {{ tpl .Values.extraTemplate . }}
+  existing: {{ lookup "apps" "v1" "Deployment" .Release.Namespace (include "sample.fullname" .) }}
+{{- end }}
+{{- define "inline.helper" -}}
+inline
+{{- end -}}

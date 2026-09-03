@@ -73,6 +73,26 @@ func (frontend) Parse(ctx context.Context, artifact *model.Artifact, detection d
 		delta = parseValues(ctx, artifact, detection)
 	case "helm_values_schema":
 		delta = parseValuesSchema(artifact, detection)
+	case "helm_template":
+		facet, diagnostics := parseTemplate(artifact, detection)
+		delta = deltaWithFacet(artifact, facet)
+		for index := range diagnostics {
+			diagnostic := diagnostics[index]
+			if delta.Diagnostics == nil {
+				delta.Diagnostics = map[string]*model.Diagnostic{}
+			}
+			delta.Diagnostics[diagnostic.ID] = &diagnostic
+			addEdge(&delta, model.IaCHasDiagnostic, artifact.ID, diagnostic.ID)
+		}
+		for _, definition := range facet.NamedTemplates {
+			addEdge(&delta, model.IaCDefinesTemplate, artifact.ID, definition.ID)
+		}
+		for _, call := range facet.TemplateCalls {
+			addEdge(&delta, model.IaCHasTemplateCall, artifact.ID, call.ID)
+		}
+		for _, reference := range facet.ValueReferences {
+			addEdge(&delta, model.IaCHasValueReference, artifact.ID, reference.ID)
+		}
 	case "helm_crd":
 		delta = parseCRDContext(ctx, artifact, detection).delta
 	case "helm_ignore":

@@ -431,6 +431,8 @@ func acceptedNodeLabels(node model.Node) []string {
 			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmValues")
 		case *model.HelmValuesSchema:
 			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmValuesSchema")
+		case *model.HelmTemplate:
+			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmTemplate")
 		case *model.HelmCRD:
 			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmCRD")
 		case *model.HelmIgnore:
@@ -445,6 +447,16 @@ func acceptedNodeLabels(node model.Node) []string {
 		return labels
 	case *model.HelmDependency:
 		return []string{"HelmDependency"}
+	case *model.HelmNamedTemplate:
+		return []string{"HelmNamedTemplate"}
+	case *model.HelmTemplateCall:
+		return []string{"HelmTemplateCall"}
+	case *model.HelmValueReference:
+		return []string{"HelmValueReference"}
+	case *model.HelmResourceTemplate:
+		return []string{"HelmResourceTemplate"}
+	case *model.HelmLookupReference:
+		return []string{"HelmLookupReference"}
 	case *model.IdentityAlias:
 		return []string{"IdentityAlias", "IaCAlias"}
 	case *model.Diagnostic:
