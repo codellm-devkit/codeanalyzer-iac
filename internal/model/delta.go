@@ -43,14 +43,13 @@ func Apply(app *Application, delta Delta) error {
 	if app == nil {
 		return fmt.Errorf("%w: nil application", ErrFactConflict)
 	}
-	for relationship := range delta.Edges {
-		if !isAllowedRelationship(relationship) {
-			return fmt.Errorf("%w: %s", ErrUnknownRelationship, relationship)
-		}
+	artifactsByID := artifactIDIndex(app)
+	if err := preflightApply(app, delta, artifactsByID); err != nil {
+		return err
 	}
 	initializeApplication(app)
 	for _, artifactID := range sortedKeys(delta.ArtifactPatches) {
-		artifact, ok := artifactByID(app, artifactID)
+		artifact, ok := artifactsByID[artifactID]
 		if !ok {
 			return fmt.Errorf("%w: %s", ErrMissingArtifact, artifactID)
 		}
@@ -76,6 +75,107 @@ func Apply(app *Application, delta Delta) error {
 		}
 		if err := mergeFacts(app.Edges[relationship], delta.Edges[relationship], string(relationship)+" edge"); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func preflightApply(app *Application, delta Delta, artifactsByID map[string]*Artifact) error {
+	for _, relationship := range sortedRelationships(delta.Edges) {
+		if !isAllowedRelationship(relationship) {
+			return fmt.Errorf("%w: %s", ErrUnknownRelationship, relationship)
+		}
+	}
+	for _, artifactID := range sortedKeys(delta.ArtifactPatches) {
+		artifact, ok := artifactsByID[artifactID]
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrMissingArtifact, artifactID)
+		}
+		if err := preflightArtifactPatch(artifact, delta.ArtifactPatches[artifactID]); err != nil {
+			return err
+		}
+	}
+	if err := checkFacts(app.Packages, delta.Packages, "package"); err != nil {
+		return err
+	}
+	if err := checkFacts(app.ExternalChartReferences, delta.ExternalChartReferences, "external chart reference"); err != nil {
+		return err
+	}
+	if err := checkFacts(app.KubernetesResourceAddresses, delta.KubernetesResourceAddresses, "kubernetes resource address"); err != nil {
+		return err
+	}
+	if err := checkFacts(app.Diagnostics, delta.Diagnostics, "diagnostic"); err != nil {
+		return err
+	}
+	for _, relationship := range sortedRelationships(delta.Edges) {
+		if err := checkFacts(app.Edges[relationship], delta.Edges[relationship], string(relationship)+" edge"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func preflightArtifactPatch(artifact *Artifact, patch ArtifactPatch) error {
+	effectiveFacet := artifact.IaC
+	if patch.Facet != nil {
+		if artifact.IaC == nil {
+			effectiveFacet = patch.Facet
+		} else if !reflect.DeepEqual(artifact.IaC, patch.Facet) {
+			if artifact.IaC.DialectName() != patch.Facet.DialectName() {
+				return fmt.Errorf("%w: %s and %s", ErrDialectConflict, artifact.IaC.DialectName(), patch.Facet.DialectName())
+			}
+			return &ConflictError{Key: "artifact facet"}
+		}
+	}
+	if patch.ConfigFacet != nil && artifact.CodeAnalyzerIaCConfig != nil && !reflect.DeepEqual(artifact.CodeAnalyzerIaCConfig, patch.ConfigFacet) {
+		return &ConflictError{Key: "artifact config facet"}
+	}
+	if err := checkFacts(artifact.ConfigKeys, patch.ConfigKeys, "config key"); err != nil {
+		return err
+	}
+	template, isTemplate := effectiveFacet.(*HelmTemplate)
+	if len(patch.TemplateCallTargets) != 0 {
+		if !isTemplate || template == nil {
+			return &ConflictError{Key: "template call target on non-template artifact " + artifact.ID}
+		}
+		for _, key := range sortedKeys(patch.TemplateCallTargets) {
+			call := template.TemplateCalls[key]
+			if call == nil || call.ID == "" {
+				return &ConflictError{Key: "missing template call " + key}
+			}
+			if call.TargetID != "" && call.TargetID != patch.TemplateCallTargets[key] {
+				return &ConflictError{Key: "template call target " + call.ID}
+			}
+		}
+	}
+	if len(patch.ValueReferenceTargets) != 0 {
+		if !isTemplate || template == nil {
+			return &ConflictError{Key: "value reference target on non-template artifact " + artifact.ID}
+		}
+		for _, key := range sortedKeys(patch.ValueReferenceTargets) {
+			reference := template.ValueReferences[key]
+			if reference == nil || reference.ID == "" {
+				return &ConflictError{Key: "missing value reference " + key}
+			}
+			if reference.TargetID != "" && reference.TargetID != patch.ValueReferenceTargets[key] {
+				return &ConflictError{Key: "value reference target " + reference.ID}
+			}
+		}
+	}
+	aliases := append([]IdentityAlias(nil), artifact.Aliases...)
+	for _, alias := range patch.Aliases {
+		found := false
+		for _, existing := range aliases {
+			if existing.ID != alias.ID {
+				continue
+			}
+			if !reflect.DeepEqual(existing, alias) {
+				return &ConflictError{Key: "alias " + alias.ID}
+			}
+			found = true
+		}
+		if !found {
+			aliases = append(aliases, alias)
 		}
 	}
 	return nil
@@ -197,13 +297,27 @@ func initializeApplication(app *Application) {
 	}
 }
 
-func artifactByID(app *Application, id string) (*Artifact, bool) {
-	for _, artifact := range app.Artifacts {
-		if artifact != nil && artifact.ID == id {
-			return artifact, true
+func artifactIDIndex(app *Application) map[string]*Artifact {
+	artifacts := map[string]*Artifact{}
+	for _, artifactPath := range sortedKeys(app.Artifacts) {
+		artifact := app.Artifacts[artifactPath]
+		if artifact == nil || artifact.ID == "" {
+			continue
+		}
+		if _, exists := artifacts[artifact.ID]; !exists {
+			artifacts[artifact.ID] = artifact
 		}
 	}
-	return nil, false
+	return artifacts
+}
+
+func checkFacts[T any](destination, source map[string]T, kind string) error {
+	for _, key := range sortedKeys(source) {
+		if existing, ok := destination[key]; ok && !reflect.DeepEqual(existing, source[key]) {
+			return &ConflictError{Key: kind + " " + key}
+		}
+	}
+	return nil
 }
 
 func mergeFacts[T any](destination, source map[string]T, kind string) error {

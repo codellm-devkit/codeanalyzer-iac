@@ -79,6 +79,198 @@ func TestApplyIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestApplyFailuresAreTransactionalAtEveryMutationBoundary(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*Application)
+		delta func(*Application) Delta
+	}{
+		{
+			name: "missing later artifact",
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{
+					app.Artifacts["a.yaml"].ID:               {TemplateCallTargets: map[string]string{"a": "target"}},
+					"can://artifact/payments/z-missing.yaml": {},
+				}}
+			},
+		},
+		{
+			name: "later facet conflict",
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{
+					app.Artifacts["a.yaml"].ID: {TemplateCallTargets: map[string]string{"a": "target"}},
+					app.Artifacts["z.yaml"].ID: {Facet: fakeTerraformFacet{}},
+				}}
+			},
+		},
+		{
+			name: "later config facet conflict",
+			setup: func(app *Application) {
+				app.Artifacts["z.yaml"].CodeAnalyzerIaCConfig = &CodeAnalyzerIaCConfig{Kind: "codeanalyzer_iac_config", ConfigVersion: 1, RenderProfiles: map[string]*HelmRenderProfile{}}
+			},
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{
+					app.Artifacts["a.yaml"].ID: {TemplateCallTargets: map[string]string{"a": "target"}},
+					app.Artifacts["z.yaml"].ID: {ConfigFacet: &CodeAnalyzerIaCConfig{Kind: "codeanalyzer_iac_config", ConfigVersion: 2, RenderProfiles: map[string]*HelmRenderProfile{}}},
+				}}
+			},
+		},
+		{
+			name: "later config key conflict",
+			setup: func(app *Application) {
+				app.Artifacts["a.yaml"].ConfigKeys["z"] = &ConfigKey{ID: "existing", Kind: "config_key"}
+			},
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{app.Artifacts["a.yaml"].ID: {ConfigKeys: map[string]*ConfigKey{
+					"a": {ID: "new", Kind: "config_key"},
+					"z": {ID: "conflicting", Kind: "config_key"},
+				}}}}
+			},
+		},
+		{
+			name: "later missing template call",
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{app.Artifacts["a.yaml"].ID: {TemplateCallTargets: map[string]string{"a": "target", "z-missing": "target"}}}}
+			},
+		},
+		{
+			name: "later template target conflict",
+			setup: func(app *Application) {
+				app.Artifacts["a.yaml"].IaC.(*HelmTemplate).TemplateCalls["z"].TargetID = "existing"
+			},
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{app.Artifacts["a.yaml"].ID: {TemplateCallTargets: map[string]string{"a": "target", "z": "conflicting"}}}}
+			},
+		},
+		{
+			name: "later missing value reference",
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{app.Artifacts["a.yaml"].ID: {ValueReferenceTargets: map[string]string{"a": "target", "z-missing": "target"}}}}
+			},
+		},
+		{
+			name: "later value target conflict",
+			setup: func(app *Application) {
+				app.Artifacts["a.yaml"].IaC.(*HelmTemplate).ValueReferences["z"].TargetID = "existing"
+			},
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{app.Artifacts["a.yaml"].ID: {ValueReferenceTargets: map[string]string{"a": "target", "z": "conflicting"}}}}
+			},
+		},
+		{
+			name: "later alias conflict",
+			setup: func(app *Application) {
+				app.Artifacts["a.yaml"].Aliases = []IdentityAlias{{ID: "z", Kind: "existing", Target: app.Artifacts["a.yaml"].ID}}
+			},
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{app.Artifacts["a.yaml"].ID: {
+					TemplateCallTargets: map[string]string{"a": "target"},
+					Aliases:             []IdentityAlias{{ID: "a", Kind: "new", Target: app.Artifacts["a.yaml"].ID}, {ID: "z", Kind: "conflicting", Target: app.Artifacts["a.yaml"].ID}},
+				}}}
+			},
+		},
+		{
+			name: "earlier duplicate existing alias conflict",
+			setup: func(app *Application) {
+				app.Artifacts["a.yaml"].Aliases = []IdentityAlias{
+					{ID: "duplicate", Kind: "conflicting", Target: app.Artifacts["z.yaml"].ID},
+					{ID: "duplicate", Kind: "matching", Target: app.Artifacts["a.yaml"].ID},
+				}
+			},
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{app.Artifacts["a.yaml"].ID: {
+					TemplateCallTargets: map[string]string{"a": "target"},
+					Aliases:             []IdentityAlias{{ID: "duplicate", Kind: "matching", Target: app.Artifacts["a.yaml"].ID}},
+				}}}
+			},
+		},
+		{
+			name: "package conflict after patch",
+			setup: func(app *Application) {
+				app.Packages["z"] = &Package{ID: "z", Kind: "package", PURL: "pkg:oci/existing"}
+			},
+			delta: func(app *Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{app.Artifacts["a.yaml"].ID: {TemplateCallTargets: map[string]string{"a": "target"}}}, Packages: map[string]*Package{"z": {ID: "z", Kind: "package", PURL: "pkg:oci/conflicting"}}}
+			},
+		},
+		{
+			name: "external reference conflict after package",
+			setup: func(app *Application) {
+				app.ExternalChartReferences["z"] = &HelmChartReference{ID: "z", Kind: "helm_chart_reference", Name: "existing", VersionConstraint: "1.x"}
+			},
+			delta: func(*Application) Delta {
+				return Delta{Packages: map[string]*Package{"a": {ID: "a", Kind: "package", PURL: "pkg:oci/a"}}, ExternalChartReferences: map[string]*HelmChartReference{"z": {ID: "z", Kind: "helm_chart_reference", Name: "conflicting", VersionConstraint: "1.x"}}}
+			},
+		},
+		{
+			name: "resource address conflict after reference",
+			setup: func(app *Application) {
+				app.KubernetesResourceAddresses["z"] = &KubernetesResourceAddress{ID: "z", Kind: "kubernetes_resource_address", ResourceKind: "Service", Name: "existing"}
+			},
+			delta: func(*Application) Delta {
+				return Delta{ExternalChartReferences: map[string]*HelmChartReference{"a": {ID: "a", Kind: "helm_chart_reference", Name: "new", VersionConstraint: "1.x"}}, KubernetesResourceAddresses: map[string]*KubernetesResourceAddress{"z": {ID: "z", Kind: "kubernetes_resource_address", ResourceKind: "Service", Name: "conflicting"}}}
+			},
+		},
+		{
+			name: "diagnostic conflict after address",
+			setup: func(app *Application) {
+				app.Diagnostics["z"] = &Diagnostic{ID: "z", Kind: "diagnostic", Severity: "error", Code: "EXISTING", Message: "existing"}
+			},
+			delta: func(*Application) Delta {
+				return Delta{KubernetesResourceAddresses: map[string]*KubernetesResourceAddress{"a": {ID: "a", Kind: "kubernetes_resource_address", ResourceKind: "Service", Name: "new"}}, Diagnostics: map[string]*Diagnostic{"z": {ID: "z", Kind: "diagnostic", Severity: "error", Code: "CONFLICT", Message: "conflicting"}}}
+			},
+		},
+		{
+			name: "edge conflict after diagnostic and earlier edge",
+			setup: func(app *Application) {
+				app.Edges[HasArtifact]["z"] = Edge{Src: app.ID, Dst: app.Artifacts["z.yaml"].ID}
+			},
+			delta: func(app *Application) Delta {
+				return Delta{Diagnostics: map[string]*Diagnostic{"a": {ID: "a", Kind: "diagnostic", Severity: "info", Code: "NEW", Message: "new"}}, Edges: map[Relationship]map[string]Edge{HasArtifact: {
+					"a": {Src: app.ID, Dst: app.Artifacts["a.yaml"].ID},
+					"z": {Src: app.ID, Dst: app.Artifacts["a.yaml"].ID},
+				}}}
+			},
+		},
+		{
+			name: "initialization before later failure",
+			setup: func(app *Application) {
+				app.Packages = nil
+				app.ExternalChartReferences = nil
+				app.KubernetesResourceAddresses = nil
+				app.Diagnostics = nil
+				app.Edges = nil
+			},
+			delta: func(*Application) Delta {
+				return Delta{ArtifactPatches: map[string]ArtifactPatch{"can://artifact/payments/missing.yaml": {}}}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := transactionalFixtureApplication()
+			if test.setup != nil {
+				test.setup(app)
+			}
+			before, err := json.Marshal(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(app, test.delta(app)); err == nil {
+				t.Fatal("Apply() succeeded, want failure")
+			}
+			after, err := json.Marshal(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("failed Apply mutated application\nbefore: %s\nafter:  %s", before, after)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsDuplicateCanonicalID(t *testing.T) {
 	app := fixtureApplication()
 	app.Packages[app.Artifacts["Chart.yaml"].ID] = &Package{ID: app.Artifacts["Chart.yaml"].ID, Kind: "package", PURL: app.Artifacts["Chart.yaml"].ID}
@@ -234,6 +426,31 @@ func fixtureApplication() *Application {
 	}
 	return NewApplication("payments", map[string]*Artifact{
 		"Chart.yaml": {ID: artifactID, Kind: "artifact", Path: "Chart.yaml", Format: "yaml", Source: "x", SHA256: digest("x"), SizeBytes: 1, ConfigKeys: map[string]*ConfigKey{}, Aliases: []IdentityAlias{}},
+	})
+}
+
+func transactionalFixtureApplication() *Application {
+	span := Span{Start: [2]int{1, 1}, End: [2]int{1, 2}, Bytes: [2]int{0, 1}}
+	templateFacet := func(prefix string) *HelmTemplate {
+		return &HelmTemplate{
+			Dialect: "helm", Kind: "helm_template", Status: "complete",
+			NamedTemplates: map[string]*HelmNamedTemplate{},
+			TemplateCalls: map[string]*HelmTemplateCall{
+				"a": {ID: prefix + "/call-a", Kind: "helm_template_call", Span: span},
+				"z": {ID: prefix + "/call-z", Kind: "helm_template_call", Span: span},
+			},
+			ValueReferences: map[string]*HelmValueReference{
+				"a": {ID: prefix + "/value-a", Kind: "helm_value_reference", Span: span},
+				"z": {ID: prefix + "/value-z", Kind: "helm_value_reference", Span: span},
+			},
+			ResourceTemplates: map[string]*HelmResourceTemplate{}, LookupReferences: map[string]*HelmLookupReference{},
+		}
+	}
+	aID, _ := ArtifactID("payments", "a.yaml")
+	zID, _ := ArtifactID("payments", "z.yaml")
+	return NewApplication("payments", map[string]*Artifact{
+		"a.yaml": artifact(aID, "a.yaml", "a", templateFacet(SemanticID("payments", "helm", "a"))),
+		"z.yaml": artifact(zID, "z.yaml", "z", &HelmChart{Dialect: "helm", Kind: "helm_chart", Status: "complete", APIVersion: "v2", Name: "z", Version: "1.0.0", Dependencies: map[string]*HelmDependency{}, Renders: map[string]*HelmRender{}}),
 	})
 }
 

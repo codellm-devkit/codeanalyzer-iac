@@ -9,11 +9,15 @@ import (
 	"strings"
 	"text/template/parse"
 
+	"github.com/Masterminds/semver/v3"
+	"github.com/goccy/go-yaml"
+
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
 
 const helmAmbiguousValueReferenceCode = "IAC_HELM_AMBIGUOUS_VALUE_REFERENCE"
 const helmAmbiguousVendoredDependencyCode = "IAC_HELM_AMBIGUOUS_VENDORED_DEPENDENCY"
+const helmIncompatibleVendoredDependencyCode = "IAC_HELM_INCOMPATIBLE_VENDORED_DEPENDENCY"
 
 type resolvedChart struct {
 	artifact  *model.Artifact
@@ -21,9 +25,43 @@ type resolvedChart struct {
 	directory string
 }
 
+type resolutionIndex struct {
+	charts                  []*resolvedChart
+	chartByDirectory        map[string]*resolvedChart
+	ownerByArtifactID       map[string]*resolvedChart
+	artifactsByChartID      map[string][]*model.Artifact
+	directChildrenByName    map[string]map[string][]*resolvedChart
+	directChildrenByFolder  map[string]map[string][]*resolvedChart
+	nestedChartIDs          map[string]bool
+	valuesByChartID         map[string][]chartValuesDocument
+	definitionEmptinessByID map[string]map[string]bool
+}
+
+type chartValuesDocument struct {
+	artifactID string
+	priority   int
+	values     map[string]any
+}
+
+type dependencyLink struct {
+	child         *resolvedChart
+	dependency    *model.HelmDependency
+	declarationID string
+	effectiveName string
+}
+
+type renderChartInstance struct {
+	chart    *resolvedChart
+	fullPath string
+}
+
+type renderTree struct {
+	root      *resolvedChart
+	instances []renderChartInstance
+}
+
 type templateDefinitionCandidate struct {
 	definition *model.HelmNamedTemplate
-	relative   string
 	empty      bool
 }
 
@@ -45,7 +83,10 @@ func resolveContext(ctx context.Context, app *model.Application) (model.Delta, e
 		return model.Delta{}, nil
 	}
 	delta := model.Delta{}
-	charts := resolvedChartIndex(app)
+	index, err := newResolutionIndex(ctx, app)
+	if err != nil {
+		return model.Delta{}, err
+	}
 
 	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
 		if err := contextError(ctx); err != nil {
@@ -58,23 +99,37 @@ func resolveContext(ctx context.Context, app *model.Application) (model.Delta, e
 		if _, anchor := artifact.IaC.(*model.HelmChart); anchor {
 			continue
 		}
-		if chart := nearestResolvedChart(charts, artifact.Path); chart != nil {
+		if chart := index.ownerByArtifactID[artifact.ID]; chart != nil {
 			addEdge(&delta, model.IaCPartOfChart, artifact.ID, chart.artifact.ID)
 		}
 	}
 
-	for index := range charts {
+	linksByOwner := map[string][]dependencyLink{}
+	for _, chart := range index.charts {
 		if err := contextError(ctx); err != nil {
 			return model.Delta{}, err
 		}
-		chart := &charts[index]
-		if err := resolveDependencies(ctx, &delta, app, chart, charts); err != nil {
+		links, err := resolveDependencies(ctx, &delta, index, chart)
+		if err != nil {
 			return model.Delta{}, err
 		}
-		if err := resolveChartTemplates(ctx, &delta, app, chart, charts); err != nil {
+		linksByOwner[chart.artifact.ID] = links
+	}
+
+	trees, err := renderTreeIndex(ctx, index, linksByOwner)
+	if err != nil {
+		return model.Delta{}, err
+	}
+	for _, tree := range trees {
+		if err := resolveRenderTreeTemplates(ctx, &delta, index, tree); err != nil {
 			return model.Delta{}, err
 		}
-		if err := resolveChartValues(ctx, &delta, app, chart, charts); err != nil {
+	}
+	for _, chart := range index.charts {
+		if err := contextError(ctx); err != nil {
+			return model.Delta{}, err
+		}
+		if err := resolveChartValues(ctx, &delta, index, chart); err != nil {
 			return model.Delta{}, err
 		}
 	}
@@ -84,12 +139,21 @@ func resolveContext(ctx context.Context, app *model.Application) (model.Delta, e
 	return delta, nil
 }
 
-func resolvedChartIndex(app *model.Application) []resolvedChart {
-	charts := make([]resolvedChart, 0)
-	if app == nil {
-		return charts
+func newResolutionIndex(ctx context.Context, app *model.Application) (*resolutionIndex, error) {
+	index := &resolutionIndex{
+		chartByDirectory:        map[string]*resolvedChart{},
+		ownerByArtifactID:       map[string]*resolvedChart{},
+		artifactsByChartID:      map[string][]*model.Artifact{},
+		directChildrenByName:    map[string]map[string][]*resolvedChart{},
+		directChildrenByFolder:  map[string]map[string][]*resolvedChart{},
+		nestedChartIDs:          map[string]bool{},
+		valuesByChartID:         map[string][]chartValuesDocument{},
+		definitionEmptinessByID: map[string]map[string]bool{},
 	}
 	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
 		artifact := app.Artifacts[artifactPath]
 		if artifact == nil || artifact.ID == "" {
 			continue
@@ -102,48 +166,116 @@ func resolvedChartIndex(app *model.Application) []resolvedChart {
 		if cleaned == "" || path.Base(cleaned) != "Chart.yaml" {
 			continue
 		}
-		charts = append(charts, resolvedChart{artifact: artifact, facet: facet, directory: path.Dir(cleaned)})
+		chart := &resolvedChart{artifact: artifact, facet: facet, directory: path.Dir(cleaned)}
+		index.charts = append(index.charts, chart)
+		index.chartByDirectory[chart.directory] = chart
 	}
-	sort.Slice(charts, func(i, j int) bool {
-		leftDepth, rightDepth := pathDepth(charts[i].directory), pathDepth(charts[j].directory)
-		if leftDepth != rightDepth {
-			return leftDepth > rightDepth
-		}
-		return charts[i].artifact.ID < charts[j].artifact.ID
+	sort.Slice(index.charts, func(i, j int) bool {
+		return index.charts[i].artifact.ID < index.charts[j].artifact.ID
 	})
-	return charts
+
+	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
+		artifact := app.Artifacts[artifactPath]
+		if artifact == nil || artifact.ID == "" || cleanArtifactPath(artifact.Path) == "" {
+			continue
+		}
+		owner := nearestIndexedChart(index.chartByDirectory, artifact.Path)
+		if owner == nil {
+			continue
+		}
+		index.ownerByArtifactID[artifact.ID] = owner
+		index.artifactsByChartID[owner.artifact.ID] = append(index.artifactsByChartID[owner.artifact.ID], artifact)
+		switch facet := artifact.IaC.(type) {
+		case *model.HelmValues:
+			if facet == nil {
+				continue
+			}
+			values := map[string]any{}
+			if yaml.Unmarshal([]byte(artifact.Source), &values) == nil {
+				index.valuesByChartID[owner.artifact.ID] = append(index.valuesByChartID[owner.artifact.ID], chartValuesDocument{artifactID: artifact.ID, priority: valueSourcePriority(facet.Roles), values: values})
+			}
+		case *model.HelmTemplate:
+			if facet == nil {
+				continue
+			}
+			emptiness, err := templateDefinitionEmptiness(ctx, artifact)
+			if err != nil {
+				return nil, err
+			}
+			index.definitionEmptinessByID[artifact.ID] = emptiness
+		}
+	}
+	for chartID := range index.valuesByChartID {
+		sort.Slice(index.valuesByChartID[chartID], func(i, j int) bool {
+			left, right := index.valuesByChartID[chartID][i], index.valuesByChartID[chartID][j]
+			if left.priority != right.priority {
+				return left.priority > right.priority
+			}
+			return left.artifactID < right.artifactID
+		})
+	}
+
+	for _, child := range index.charts {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
+		chartsDirectory := path.Dir(child.directory)
+		if path.Base(chartsDirectory) != "charts" {
+			continue
+		}
+		parent := index.chartByDirectory[path.Dir(chartsDirectory)]
+		if parent == nil {
+			continue
+		}
+		if index.directChildrenByName[parent.artifact.ID] == nil {
+			index.directChildrenByName[parent.artifact.ID] = map[string][]*resolvedChart{}
+			index.directChildrenByFolder[parent.artifact.ID] = map[string][]*resolvedChart{}
+		}
+		index.directChildrenByName[parent.artifact.ID][child.facet.Name] = append(index.directChildrenByName[parent.artifact.ID][child.facet.Name], child)
+		folder := path.Base(child.directory)
+		index.directChildrenByFolder[parent.artifact.ID][folder] = append(index.directChildrenByFolder[parent.artifact.ID][folder], child)
+		index.nestedChartIDs[child.artifact.ID] = true
+	}
+	return index, nil
 }
 
-func nearestResolvedChart(charts []resolvedChart, artifactPath string) *resolvedChart {
+func nearestIndexedChart(chartsByDirectory map[string]*resolvedChart, artifactPath string) *resolvedChart {
 	cleaned := cleanArtifactPath(artifactPath)
 	if cleaned == "" {
 		return nil
 	}
-	for index := range charts {
-		chart := &charts[index]
-		if cleaned == cleanArtifactPath(chart.artifact.Path) || chart.directory == "." || strings.HasPrefix(cleaned, chart.directory+"/") {
+	directory := path.Dir(cleaned)
+	for {
+		if chart := chartsByDirectory[directory]; chart != nil {
 			return chart
 		}
+		if directory == "." {
+			return nil
+		}
+		directory = path.Dir(directory)
 	}
-	return nil
 }
 
-func resolveDependencies(ctx context.Context, delta *model.Delta, app *model.Application, chart *resolvedChart, charts []resolvedChart) error {
+func resolveDependencies(ctx context.Context, delta *model.Delta, index *resolutionIndex, chart *resolvedChart) ([]dependencyLink, error) {
+	links := make([]dependencyLink, 0)
 	for _, dependencyKey := range sortedDependencyKeys(chart.facet.Dependencies) {
 		if err := contextError(ctx); err != nil {
-			return err
+			return nil, err
 		}
-		if err := resolveDependency(ctx, delta, chart, charts, dependencyKey, chart.facet.Dependencies[dependencyKey]); err != nil {
-			return err
+		link, err := resolveDependency(ctx, delta, index, chart, dependencyKey, chart.facet.Dependencies[dependencyKey])
+		if err != nil {
+			return nil, err
+		}
+		if link != nil {
+			links = append(links, *link)
 		}
 	}
-	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
+	for _, artifact := range index.artifactsByChartID[chart.artifact.ID] {
 		if err := contextError(ctx); err != nil {
-			return err
-		}
-		artifact := app.Artifacts[artifactPath]
-		if artifact == nil || nearestResolvedChart(charts, artifact.Path) != chart {
-			continue
+			return nil, err
 		}
 		requirements, ok := artifact.IaC.(*model.HelmRequirements)
 		if !ok || requirements == nil {
@@ -151,24 +283,37 @@ func resolveDependencies(ctx context.Context, delta *model.Delta, app *model.App
 		}
 		for _, dependencyKey := range sortedDependencyKeys(requirements.Dependencies) {
 			if err := contextError(ctx); err != nil {
-				return err
+				return nil, err
 			}
 			dependency := requirements.Dependencies[dependencyKey]
 			if dependency == nil || dependency.ID == "" {
 				continue
 			}
 			addEdge(delta, model.IaCDeclaresDependency, chart.artifact.ID, dependency.ID)
-			if err := resolveDependency(ctx, delta, chart, charts, dependencyKey, dependency); err != nil {
-				return err
+			link, err := resolveDependency(ctx, delta, index, chart, dependencyKey, dependency)
+			if err != nil {
+				return nil, err
+			}
+			if link != nil {
+				links = append(links, *link)
 			}
 		}
 	}
-	return nil
+	sort.Slice(links, func(i, j int) bool {
+		if links[i].effectiveName != links[j].effectiveName {
+			return links[i].effectiveName < links[j].effectiveName
+		}
+		if links[i].child.artifact.ID != links[j].child.artifact.ID {
+			return links[i].child.artifact.ID < links[j].child.artifact.ID
+		}
+		return links[i].declarationID < links[j].declarationID
+	})
+	return links, nil
 }
 
-func resolveDependency(ctx context.Context, delta *model.Delta, owner *resolvedChart, charts []resolvedChart, dependencyKey string, dependency *model.HelmDependency) error {
+func resolveDependency(ctx context.Context, delta *model.Delta, index *resolutionIndex, owner *resolvedChart, dependencyKey string, dependency *model.HelmDependency) (*dependencyLink, error) {
 	if dependency == nil || dependency.ID == "" || dependency.Name == "" || dependency.VersionConstraint == "" {
-		return nil
+		return nil, nil
 	}
 	referenceID := semanticIDForArtifact(owner.artifact, "chart-reference", dependencyKey)
 	reference := &model.HelmChartReference{
@@ -178,59 +323,64 @@ func resolveDependency(ctx context.Context, delta *model.Delta, owner *resolvedC
 		VersionConstraint: dependency.VersionConstraint,
 		Repository:        dependency.Repository,
 	}
-	candidates, err := vendoredChartCandidates(ctx, owner, charts, dependency)
+	candidates, incompatible, err := vendoredChartCandidates(ctx, index, owner, dependency)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var link *dependencyLink
 	if len(candidates) == 1 {
 		reference.ResolvedChartID = candidates[0].artifact.ID
 		addEdge(delta, model.IaCResolvesToChart, reference.ID, reference.ResolvedChartID)
+		effectiveName := candidates[0].facet.Name
+		if dependency.Alias != "" {
+			effectiveName = dependency.Alias
+		}
+		link = &dependencyLink{child: candidates[0], dependency: dependency, declarationID: dependency.ID, effectiveName: effectiveName}
 	} else if len(candidates) > 1 {
 		ids := make([]string, 0, len(candidates))
 		for _, candidate := range candidates {
 			ids = append(ids, candidate.artifact.ID)
 		}
 		addResolutionDiagnostic(delta, owner.artifact, helmAmbiguousVendoredDependencyCode, "dependency "+dependencyKey+" matches multiple vendored charts: "+strings.Join(ids, ", "), "dependency", dependencyKey)
-	} else if purl, ok := ociDependencyPURL(dependency); ok {
-		reference.PURL = purl
-		if delta.Packages == nil {
-			delta.Packages = map[string]*model.Package{}
+	} else {
+		if len(incompatible) > 0 {
+			addResolutionDiagnostic(delta, owner.artifact, helmIncompatibleVendoredDependencyCode, "dependency "+dependencyKey+" has only incompatible vendored candidates: "+strings.Join(incompatible, ", "), "dependency", dependencyKey)
 		}
-		delta.Packages[purl] = &model.Package{ID: purl, Kind: "package", PURL: purl}
-		addEdge(delta, model.IaCIdentifiedByPackage, reference.ID, purl)
+		if purl, ok := ociDependencyPURL(dependency); ok {
+			reference.PURL = purl
+			if delta.Packages == nil {
+				delta.Packages = map[string]*model.Package{}
+			}
+			delta.Packages[purl] = &model.Package{ID: purl, Kind: "package", PURL: purl}
+			addEdge(delta, model.IaCIdentifiedByPackage, reference.ID, purl)
+		}
 	}
 	if delta.ExternalChartReferences == nil {
 		delta.ExternalChartReferences = map[string]*model.HelmChartReference{}
 	}
 	delta.ExternalChartReferences[reference.ID] = reference
 	addEdge(delta, model.IaCTargetsChartReference, dependency.ID, reference.ID)
-	return nil
+	return link, nil
 }
 
-func vendoredChartCandidates(ctx context.Context, owner *resolvedChart, charts []resolvedChart, dependency *model.HelmDependency) ([]resolvedChart, error) {
+func vendoredChartCandidates(ctx context.Context, index *resolutionIndex, owner *resolvedChart, dependency *model.HelmDependency) ([]*resolvedChart, []string, error) {
 	bestScore := 100
-	result := make([]resolvedChart, 0)
-	vendoredDirectory := "charts"
-	if owner.directory != "." {
-		vendoredDirectory = owner.directory + "/charts"
-	}
-	for _, candidate := range charts {
+	result := make([]*resolvedChart, 0)
+	incompatibleSet := map[string]bool{}
+	for _, candidate := range index.directChildrenByName[owner.artifact.ID][dependency.Name] {
 		if err := contextError(ctx); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if candidate.artifact.ID == owner.artifact.ID {
+		if !isHelmCompatibleRange(dependency.VersionConstraint, candidate.facet.Version) {
+			incompatibleSet[candidate.artifact.ID] = true
 			continue
 		}
-		prefix := vendoredDirectory + "/"
-		if !strings.HasPrefix(candidate.directory, prefix) {
-			continue
-		}
-		folder := strings.TrimPrefix(candidate.directory, prefix)
-		if folder == "" || strings.Contains(folder, "/") {
-			continue
-		}
+		folder := path.Base(candidate.directory)
 		score, matched := vendoredMatchScore(folder, candidate.facet.Name, dependency)
-		if !matched || score > bestScore {
+		if !matched {
+			continue
+		}
+		if score > bestScore {
 			continue
 		}
 		if score < bestScore {
@@ -239,8 +389,164 @@ func vendoredChartCandidates(ctx context.Context, owner *resolvedChart, charts [
 		}
 		result = append(result, candidate)
 	}
+	nearFolders := []string{dependency.Name}
+	if dependency.Alias != "" {
+		nearFolders = append(nearFolders, dependency.Alias)
+	}
+	for _, folder := range nearFolders {
+		for _, candidate := range index.directChildrenByFolder[owner.artifact.ID][folder] {
+			if err := contextError(ctx); err != nil {
+				return nil, nil, err
+			}
+			if candidate.facet.Name != dependency.Name || !isHelmCompatibleRange(dependency.VersionConstraint, candidate.facet.Version) {
+				incompatibleSet[candidate.artifact.ID] = true
+			}
+		}
+	}
 	sort.Slice(result, func(i, j int) bool { return result[i].artifact.ID < result[j].artifact.ID })
-	return result, nil
+	incompatible := sortedKeysLocal(incompatibleSet)
+	sort.Strings(incompatible)
+	return result, incompatible, nil
+}
+
+func isHelmCompatibleRange(constraint, version string) bool {
+	// This is Helm 4.2.4 chartutil.IsCompatibleRange's exact algorithm,
+	// kept local so resolution does not import Helm's unrelated SDK surface.
+	parsedVersion, err := semver.NewVersion(version)
+	if err != nil {
+		return false
+	}
+	parsedConstraint, err := semver.NewConstraint(constraint)
+	return err == nil && parsedConstraint.Check(parsedVersion)
+}
+
+func dependencyEnabled(index *resolutionIndex, root, owner *resolvedChart, ownerPrefix string, dependency *model.HelmDependency) bool {
+	resolveBool := func(valuePath string) (bool, bool) {
+		if ownerPrefix != "" {
+			if value, found := resolvedChartBool(index, root, ownerPrefix+valuePath); found {
+				return value, true
+			}
+		}
+		return resolvedChartBool(index, owner, valuePath)
+	}
+	enabled := true
+	var hasTrue, hasFalse bool
+	for _, tag := range dependency.Tags {
+		value, found := resolvedChartBool(index, root, "tags."+tag)
+		if !found && root != owner {
+			value, found = resolvedChartBool(index, owner, "tags."+tag)
+		}
+		if found {
+			if value {
+				hasTrue = true
+			} else {
+				hasFalse = true
+			}
+		}
+	}
+	if !hasTrue && hasFalse {
+		enabled = false
+	} else if hasTrue {
+		enabled = true
+	}
+	for condition := range strings.SplitSeq(strings.TrimSpace(dependency.Condition), ",") {
+		condition = strings.TrimSpace(condition)
+		if condition == "" {
+			continue
+		}
+		if value, found := resolveBool(condition); found {
+			return value
+		}
+	}
+	return enabled
+}
+
+func resolvedChartBool(index *resolutionIndex, owner *resolvedChart, valuePath string) (bool, bool) {
+	if index == nil || owner == nil {
+		return false, false
+	}
+	priority := -1
+	var resolved bool
+	found := false
+	for _, document := range index.valuesByChartID[owner.artifact.ID] {
+		value, ok := nestedBool(document.values, valuePath)
+		if !ok {
+			continue
+		}
+		if priority == -1 {
+			priority = document.priority
+			resolved = value
+			found = true
+			continue
+		}
+		if document.priority != priority {
+			break
+		}
+		if value != resolved {
+			return false, false
+		}
+	}
+	return resolved, found
+}
+
+func nestedBool(values map[string]any, valuePath string) (bool, bool) {
+	var current any = values
+	for _, segment := range strings.Split(valuePath, ".") {
+		mapping, ok := current.(map[string]any)
+		if !ok {
+			return false, false
+		}
+		current, ok = mapping[segment]
+		if !ok {
+			return false, false
+		}
+	}
+	value, ok := current.(bool)
+	return value, ok
+}
+
+func renderTreeIndex(ctx context.Context, index *resolutionIndex, linksByOwner map[string][]dependencyLink) ([]renderTree, error) {
+	trees := make([]renderTree, 0)
+	for _, root := range index.charts {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
+		if index.nestedChartIDs[root.artifact.ID] {
+			continue
+		}
+		tree := renderTree{root: root}
+		seen := map[string]bool{}
+		active := map[string]bool{}
+		var appendChart func(*resolvedChart, string, string) error
+		appendChart = func(chart *resolvedChart, fullPath, chartPrefix string) error {
+			if err := contextError(ctx); err != nil {
+				return err
+			}
+			instanceKey := chart.artifact.ID + "\x00" + fullPath
+			if seen[instanceKey] || active[chart.artifact.ID] {
+				return nil
+			}
+			seen[instanceKey] = true
+			active[chart.artifact.ID] = true
+			defer delete(active, chart.artifact.ID)
+			tree.instances = append(tree.instances, renderChartInstance{chart: chart, fullPath: fullPath})
+			for _, link := range linksByOwner[chart.artifact.ID] {
+				if !dependencyEnabled(index, root, chart, chartPrefix, link.dependency) {
+					continue
+				}
+				childPrefix := chartPrefix + link.effectiveName + "."
+				if err := appendChart(link.child, path.Join(fullPath, "charts", link.effectiveName), childPrefix); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := appendChart(root, root.facet.Name, ""); err != nil {
+			return nil, err
+		}
+		trees = append(trees, tree)
+	}
+	return trees, nil
 }
 
 func vendoredMatchScore(folder, chartName string, dependency *model.HelmDependency) (int, bool) {
@@ -309,107 +615,117 @@ func encodePURLComponent(value string) string {
 	return builder.String()
 }
 
-func resolveChartTemplates(ctx context.Context, delta *model.Delta, app *model.Application, chart *resolvedChart, charts []resolvedChart) error {
-	definitions := map[string][]templateDefinitionCandidate{}
+func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *resolutionIndex, tree renderTree) error {
+	definitionsByFile := map[string]map[string][]templateDefinitionCandidate{}
 	definitionIDs := map[string]bool{}
-	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
+	templateArtifacts := map[string]*model.Artifact{}
+	for _, instance := range tree.instances {
 		if err := contextError(ctx); err != nil {
 			return err
 		}
-		artifact := app.Artifacts[artifactPath]
-		if artifact == nil || nearestResolvedChart(charts, artifact.Path) != chart {
-			continue
-		}
-		template, ok := artifact.IaC.(*model.HelmTemplate)
-		if !ok || template == nil {
-			continue
-		}
-		emptyDefinitions, err := templateDefinitionEmptiness(ctx, artifact)
-		if err != nil {
-			return err
-		}
-		for _, key := range sortedKeysLocal(template.NamedTemplates) {
-			definition := template.NamedTemplates[key]
-			if definition == nil || definition.ID == "" || definition.Name == "" {
+		for _, artifact := range index.artifactsByChartID[instance.chart.artifact.ID] {
+			if err := contextError(ctx); err != nil {
+				return err
+			}
+			templateFacet, ok := artifact.IaC.(*model.HelmTemplate)
+			if !ok || templateFacet == nil {
 				continue
 			}
-			relative := strings.TrimPrefix(cleanArtifactPath(artifact.Path), chart.directory+"/")
-			empty := emptyDefinitions[templateDefinitionSpanKey(definition.Name, definition.Span.Bytes[0], definition.Span.Bytes[1])]
-			definitions[definition.Name] = append(definitions[definition.Name], templateDefinitionCandidate{definition: definition, relative: relative, empty: empty})
-			definitionIDs[definition.ID] = true
+			relative := artifactRelativePath(instance.chart, artifact)
+			if instance.chart.facet.ChartType == "library" && !strings.HasPrefix(path.Base(relative), "_") {
+				continue
+			}
+			templateArtifacts[artifact.ID] = artifact
+			filename := path.Join(instance.fullPath, relative)
+			if definitionsByFile[filename] == nil {
+				definitionsByFile[filename] = map[string][]templateDefinitionCandidate{}
+			}
+			for _, key := range sortedKeysLocal(templateFacet.NamedTemplates) {
+				definition := templateFacet.NamedTemplates[key]
+				if definition == nil || definition.ID == "" || definition.Name == "" {
+					continue
+				}
+				empty := index.definitionEmptinessByID[artifact.ID][templateDefinitionSpanKey(definition.Name, definition.Span.Bytes[0], definition.Span.Bytes[1])]
+				definitionsByFile[filename][definition.Name] = append(definitionsByFile[filename][definition.Name], templateDefinitionCandidate{definition: definition, empty: empty})
+				definitionIDs[definition.ID] = true
+			}
 		}
 	}
+
+	filenames := sortedKeysLocal(definitionsByFile)
+	sort.Slice(filenames, func(i, j int) bool {
+		leftDepth, rightDepth := strings.Count(filenames[i], "/"), strings.Count(filenames[j], "/")
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return filenames[i] > filenames[j]
+	})
+	definitions := map[string][]templateDefinitionCandidate{}
+	invalidRenderTree := false
+	for _, filename := range filenames {
+		for _, name := range sortedKeysLocal(definitionsByFile[filename]) {
+			candidates := definitionsByFile[filename][name]
+			sort.Slice(candidates, func(i, j int) bool {
+				if candidates[i].definition.Span.Bytes[0] != candidates[j].definition.Span.Bytes[0] {
+					return candidates[i].definition.Span.Bytes[0] < candidates[j].definition.Span.Bytes[0]
+				}
+				return candidates[i].definition.ID < candidates[j].definition.ID
+			})
+			nonEmpty := make([]templateDefinitionCandidate, 0, len(candidates))
+			for _, candidate := range candidates {
+				if !candidate.empty {
+					nonEmpty = append(nonEmpty, candidate)
+				}
+			}
+			if len(nonEmpty) > 1 {
+				invalidRenderTree = true
+				ids := make([]string, 0, len(nonEmpty))
+				for _, candidate := range nonEmpty {
+					ids = append(ids, candidate.definition.ID)
+				}
+				addResolutionDiagnostic(delta, tree.root.artifact, helmDuplicateTemplateDefinitionCode, fmt.Sprintf("named template %q has multiple non-empty definitions in %s; Helm rejects the render tree: %s", name, filename, strings.Join(ids, ", ")), "template", filename+"\x00"+name)
+				continue
+			}
+			effective := candidates[len(candidates)-1]
+			if len(nonEmpty) == 1 {
+				effective = nonEmpty[0]
+			}
+			definitions[name] = append(definitions[name], effective)
+		}
+	}
+	if invalidRenderTree {
+		return nil
+	}
+
 	winners := map[string]*model.HelmNamedTemplate{}
 	for _, name := range sortedKeysLocal(definitions) {
 		if err := contextError(ctx); err != nil {
 			return err
 		}
 		candidates := definitions[name]
-		// Helm 4.2.4 parses deeper paths first and equal-depth paths in
-		// descending lexical order; later definitions replace earlier ones.
-		// Therefore the winner is shallowest, lexical-first, and then the last
-		// definition in a single source file.
-		sort.Slice(candidates, func(i, j int) bool {
-			leftDepth, rightDepth := pathDepth(candidates[i].relative), pathDepth(candidates[j].relative)
-			if leftDepth != rightDepth {
-				return leftDepth < rightDepth
-			}
-			if candidates[i].relative != candidates[j].relative {
-				return candidates[i].relative < candidates[j].relative
-			}
-			if candidates[i].definition.Span.Bytes[0] != candidates[j].definition.Span.Bytes[0] {
-				return candidates[i].definition.Span.Bytes[0] > candidates[j].definition.Span.Bytes[0]
-			}
-			return candidates[i].definition.ID < candidates[j].definition.ID
-		})
-		winner := candidates[0]
-		winnerFound := false
+		winner := templateDefinitionCandidate{}
 		for _, candidate := range candidates {
-			if !candidate.empty {
+			if winner.definition == nil || !candidate.empty {
 				winner = candidate
-				winnerFound = true
-				break
 			}
-		}
-		if !winnerFound {
-			// If every definition is empty, Go's template association retains
-			// the first file parsed. Within one file its parser retains the last
-			// empty declaration for that name.
-			sort.Slice(candidates, func(i, j int) bool {
-				leftDepth, rightDepth := pathDepth(candidates[i].relative), pathDepth(candidates[j].relative)
-				if leftDepth != rightDepth {
-					return leftDepth > rightDepth
-				}
-				if candidates[i].relative != candidates[j].relative {
-					return candidates[i].relative > candidates[j].relative
-				}
-				if candidates[i].definition.Span.Bytes[0] != candidates[j].definition.Span.Bytes[0] {
-					return candidates[i].definition.Span.Bytes[0] > candidates[j].definition.Span.Bytes[0]
-				}
-				return candidates[i].definition.ID < candidates[j].definition.ID
-			})
-			winner = candidates[0]
 		}
 		winners[name] = winner.definition
-		if len(candidates) > 1 {
-			ids := make([]string, 0, len(candidates))
-			for _, candidate := range candidates {
-				ids = append(ids, candidate.definition.ID)
-			}
-			sort.Strings(ids)
+		candidateIDs := map[string]bool{}
+		for _, candidate := range candidates {
+			candidateIDs[candidate.definition.ID] = true
+		}
+		if len(candidateIDs) > 1 {
+			ids := sortedKeysLocal(candidateIDs)
 			message := fmt.Sprintf("named template %q has multiple definitions; Helm load order selects %s from candidates %s", name, winner.definition.ID, strings.Join(ids, ", "))
-			addResolutionDiagnostic(delta, chart.artifact, helmDuplicateTemplateDefinitionCode, message, "template", name)
+			addResolutionDiagnostic(delta, tree.root.artifact, helmDuplicateTemplateDefinitionCode, message, "template", name)
 		}
 	}
 
-	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
+	for _, artifactID := range sortedKeysLocal(templateArtifacts) {
 		if err := contextError(ctx); err != nil {
 			return err
 		}
-		artifact := app.Artifacts[artifactPath]
-		if artifact == nil || nearestResolvedChart(charts, artifact.Path) != chart {
-			continue
-		}
+		artifact := templateArtifacts[artifactID]
 		template, ok := artifact.IaC.(*model.HelmTemplate)
 		if !ok || template == nil {
 			continue
@@ -442,6 +758,14 @@ func resolveChartTemplates(ctx context.Context, delta *model.Delta, app *model.A
 		}
 	}
 	return nil
+}
+
+func artifactRelativePath(chart *resolvedChart, artifact *model.Artifact) string {
+	cleaned := cleanArtifactPath(artifact.Path)
+	if chart.directory == "." {
+		return cleaned
+	}
+	return strings.TrimPrefix(cleaned, chart.directory+"/")
 }
 
 func templateDefinitionEmptiness(ctx context.Context, artifact *model.Artifact) (map[string]bool, error) {
@@ -478,16 +802,12 @@ func templateDefinitionSpanKey(name string, start, end int) string {
 	return fmt.Sprintf("%s\x00%d:%d", name, start, end)
 }
 
-func resolveChartValues(ctx context.Context, delta *model.Delta, app *model.Application, chart *resolvedChart, charts []resolvedChart) error {
+func resolveChartValues(ctx context.Context, delta *model.Delta, index *resolutionIndex, chart *resolvedChart) error {
 	values := map[string][]valueCandidate{}
 	valueIDs := map[string]bool{}
-	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
+	for _, artifact := range index.artifactsByChartID[chart.artifact.ID] {
 		if err := contextError(ctx); err != nil {
 			return err
-		}
-		artifact := app.Artifacts[artifactPath]
-		if artifact == nil || nearestResolvedChart(charts, artifact.Path) != chart {
-			continue
 		}
 		facet, ok := artifact.IaC.(*model.HelmValues)
 		if !ok || facet == nil {
@@ -513,13 +833,9 @@ func resolveChartValues(ctx context.Context, delta *model.Delta, app *model.Appl
 	}
 
 	diagnosed := map[string]bool{}
-	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
+	for _, artifact := range index.artifactsByChartID[chart.artifact.ID] {
 		if err := contextError(ctx); err != nil {
 			return err
-		}
-		artifact := app.Artifacts[artifactPath]
-		if artifact == nil || nearestResolvedChart(charts, artifact.Path) != chart {
-			continue
 		}
 		template, ok := artifact.IaC.(*model.HelmTemplate)
 		if !ok || template == nil {
@@ -620,13 +936,6 @@ func addResolutionDiagnostic(delta *model.Delta, artifact *model.Artifact, code,
 	id := semanticIDForArtifact(artifact, "diagnostic", code, discriminator)
 	delta.Diagnostics[id] = &model.Diagnostic{ID: id, Kind: "diagnostic", Severity: "warning", Code: code, Message: message, Phase: phase, ArtifactID: artifact.ID}
 	addEdge(delta, model.IaCHasDiagnostic, artifact.ID, id)
-}
-
-func pathDepth(value string) int {
-	if value == "." || value == "" {
-		return 0
-	}
-	return strings.Count(value, "/") + 1
 }
 
 func isHelmArtifactFacet(facet model.ArtifactFacet) bool {

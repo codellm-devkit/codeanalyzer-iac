@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/dialect"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
@@ -176,6 +177,109 @@ func TestResolveV1RequirementsAndHTTPReferences(t *testing.T) {
 	assertResolvedApplication(t, app)
 }
 
+func TestResolveVendoredDependenciesRequireHelmCompatibleIdentity(t *testing.T) {
+	tests := []struct {
+		name       string
+		childName  string
+		version    string
+		wantTarget bool
+	}{
+		{name: "compatible aliased dependency", childName: "worker", version: "2.4.1", wantTarget: true},
+		{name: "alias folder is not chart identity", childName: "background", version: "2.4.1"},
+		{name: "incompatible version", childName: "worker", version: "9.0.0"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := map[string]*model.Artifact{
+				"platform/Chart.yaml":                               testArtifact(t, "platform/Chart.yaml", "apiVersion: v2\nname: platform\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 2.x\n    repository: https://charts.example.test\n"),
+				"platform/charts/background/Chart.yaml":             testArtifact(t, "platform/charts/background/Chart.yaml", fmt.Sprintf("apiVersion: v2\nname: %s\nversion: %s\n", test.childName, test.version)),
+				"platform/charts/background/templates/_helpers.tpl": testArtifact(t, "platform/charts/background/templates/_helpers.tpl", "{{ define \"child.only\" }}child{{ end }}\n"),
+				"platform/charts/background/templates/use.yaml":     testArtifact(t, "platform/charts/background/templates/use.yaml", "{{ include \"child.only\" . }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			deltaA, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deltaB, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := mustJSON(t, deltaB), mustJSON(t, deltaA); got != want {
+				t.Fatalf("resolution is not deterministic\nfirst:  %s\nsecond: %s", want, got)
+			}
+			if err := model.Apply(app, deltaA); err != nil {
+				t.Fatal(err)
+			}
+			dependency := artifacts["platform/Chart.yaml"].IaC.(*model.HelmChart).Dependencies["background"]
+			reference := chartReferenceForDependency(t, app, dependency.ID)
+			child := artifacts["platform/charts/background/Chart.yaml"]
+			if test.wantTarget {
+				if reference.ResolvedChartID != child.ID {
+					t.Fatalf("resolved_chart_id = %q, want compatible chart %q", reference.ResolvedChartID, child.ID)
+				}
+				assertEdge(t, app, model.IaCResolvesToChart, reference.ID, child.ID)
+				return
+			}
+			if reference.ResolvedChartID != "" || hasOutgoingEdge(app.Edges[model.IaCResolvesToChart], reference.ID) {
+				t.Fatalf("incompatible child was resolved: %#v", reference)
+			}
+			call := onlyTemplateCall(t, artifacts["platform/charts/background/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			if call.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], call.ID) {
+				t.Fatalf("incompatible vendored chart was treated as a root render tree: %#v", call)
+			}
+			assertDiagnosticCode(t, app, "IAC_HELM_INCOMPATIBLE_VENDORED_DEPENDENCY")
+		})
+	}
+}
+
+func TestResolveVendoredAmbiguityConsidersOnlyCompatibleCharts(t *testing.T) {
+	build := func(secondVersion string) (map[string]*model.Artifact, *model.Application) {
+		artifacts := map[string]*model.Artifact{
+			"root/Chart.yaml":          testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n  - name: worker\n    version: 2.x\n    repository: https://charts.example.test\n"),
+			"root/charts/a/Chart.yaml": testArtifact(t, "root/charts/a/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 2.1.0\n"),
+			"root/charts/b/Chart.yaml": testArtifact(t, "root/charts/b/Chart.yaml", fmt.Sprintf("apiVersion: v2\nname: worker\nversion: %s\n", secondVersion)),
+		}
+		return artifacts, parseL1Application(t, artifacts, nil)
+	}
+
+	artifacts, app := build("9.0.0")
+	delta, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Apply(app, delta); err != nil {
+		t.Fatal(err)
+	}
+	dependency := artifacts["root/Chart.yaml"].IaC.(*model.HelmChart).Dependencies["worker"]
+	reference := chartReferenceForDependency(t, app, dependency.ID)
+	if reference.ResolvedChartID != artifacts["root/charts/a/Chart.yaml"].ID {
+		t.Fatalf("sole compatible target = %q, want %q", reference.ResolvedChartID, artifacts["root/charts/a/Chart.yaml"].ID)
+	}
+
+	artifacts, app = build("2.9.0")
+	deltaA, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltaB, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mustJSON(t, deltaA) != mustJSON(t, deltaB) {
+		t.Fatal("ambiguous dependency resolution is not deterministic")
+	}
+	if err := model.Apply(app, deltaA); err != nil {
+		t.Fatal(err)
+	}
+	dependency = artifacts["root/Chart.yaml"].IaC.(*model.HelmChart).Dependencies["worker"]
+	reference = chartReferenceForDependency(t, app, dependency.ID)
+	if reference.ResolvedChartID != "" {
+		t.Fatalf("ambiguous dependency acquired target %q", reference.ResolvedChartID)
+	}
+	assertDiagnosticCode(t, app, helmAmbiguousVendoredDependencyCode)
+}
+
 func TestResolveUsesPinnedHelmLoadOrderAndDiagnosesDuplicates(t *testing.T) {
 	artifacts := map[string]*model.Artifact{
 		"order/Chart.yaml":                testArtifact(t, "order/Chart.yaml", "apiVersion: v2\nname: order\nversion: 1.0.0\n"),
@@ -202,6 +306,192 @@ func TestResolveUsesPinnedHelmLoadOrderAndDiagnosesDuplicates(t *testing.T) {
 	assertResolvedApplication(t, app)
 }
 
+func TestResolveUsesOneHelmNamespaceForRootAndAliasedDependency(t *testing.T) {
+	artifacts := map[string]*model.Artifact{
+		"platform/Chart.yaml":                                    testArtifact(t, "platform/Chart.yaml", "apiVersion: v2\nname: platform\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 2.x\n    repository: file://charts/background\n"),
+		"platform/templates/_helpers.tpl":                        testArtifact(t, "platform/templates/_helpers.tpl", "{{ define \"shared\" }}parent{{ end }}\n{{ define \"parent.only\" }}parent{{ end }}\n"),
+		"platform/templates/use.yaml":                            testArtifact(t, "platform/templates/use.yaml", "{{ include \"dependency.only\" . }}\n"),
+		"platform/charts/physical-folder/Chart.yaml":             testArtifact(t, "platform/charts/physical-folder/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 2.4.1\n"),
+		"platform/charts/physical-folder/templates/_helpers.tpl": testArtifact(t, "platform/charts/physical-folder/templates/_helpers.tpl", "{{ define \"shared\" }}dependency{{ end }}\n{{ define \"dependency.only\" }}dependency{{ end }}\n"),
+		"platform/charts/physical-folder/templates/use.yaml":     testArtifact(t, "platform/charts/physical-folder/templates/use.yaml", "{{ include \"parent.only\" . }}\n{{ include \"shared\" . }}\n"),
+	}
+	app := parseL1Application(t, artifacts, nil)
+	delta, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Apply(app, delta); err != nil {
+		t.Fatal(err)
+	}
+
+	parentOnly := onlyNamedTemplate(t, artifacts["platform/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "parent.only")
+	parentShared := onlyNamedTemplate(t, artifacts["platform/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "shared")
+	dependencyOnly := onlyNamedTemplate(t, artifacts["platform/charts/physical-folder/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "dependency.only")
+	parentCall := onlyTemplateCall(t, artifacts["platform/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+	if parentCall.TargetID != dependencyOnly.ID {
+		t.Fatalf("parent-to-dependency call target = %q, want %q", parentCall.TargetID, dependencyOnly.ID)
+	}
+	dependencyCalls := sortedTemplateCalls(artifacts["platform/charts/physical-folder/templates/use.yaml"].IaC.(*model.HelmTemplate))
+	if len(dependencyCalls) != 2 {
+		t.Fatalf("dependency call count = %d, want 2", len(dependencyCalls))
+	}
+	wantTargets := map[string]string{"parent.only": parentOnly.ID, "shared": parentShared.ID}
+	for _, call := range dependencyCalls {
+		if call.TargetID != wantTargets[call.NameExpression] {
+			t.Errorf("dependency call %q target = %q, want %q", call.NameExpression, call.TargetID, wantTargets[call.NameExpression])
+		}
+		assertEdge(t, app, model.IaCCallsTemplate, call.ID, wantTargets[call.NameExpression])
+	}
+	assertDiagnosticCode(t, app, helmDuplicateTemplateDefinitionCode)
+	assertResolvedApplication(t, app)
+}
+
+func TestResolveExcludesDisabledVendoredDependencyFromRenderNamespace(t *testing.T) {
+	artifacts := map[string]*model.Artifact{
+		"platform/Chart.yaml":                           testArtifact(t, "platform/Chart.yaml", "apiVersion: v2\nname: platform\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 2.x\n    repository: file://charts/worker\n    condition: background.enabled\n"),
+		"platform/values.yaml":                          testArtifact(t, "platform/values.yaml", "background:\n  enabled: false\n"),
+		"platform/templates/use.yaml":                   testArtifact(t, "platform/templates/use.yaml", "{{ include \"dependency.only\" . }}\n"),
+		"platform/charts/worker/Chart.yaml":             testArtifact(t, "platform/charts/worker/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 2.4.1\n"),
+		"platform/charts/worker/templates/_helpers.tpl": testArtifact(t, "platform/charts/worker/templates/_helpers.tpl", "{{ define \"dependency.only\" }}dependency{{ end }}\n"),
+		"platform/charts/worker/templates/use.yaml":     testArtifact(t, "platform/charts/worker/templates/use.yaml", "{{ include \"dependency.only\" . }}\n"),
+	}
+	app := parseL1Application(t, artifacts, nil)
+	delta, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Apply(app, delta); err != nil {
+		t.Fatal(err)
+	}
+	dependency := artifacts["platform/Chart.yaml"].IaC.(*model.HelmChart).Dependencies["background"]
+	reference := chartReferenceForDependency(t, app, dependency.ID)
+	if reference.ResolvedChartID != artifacts["platform/charts/worker/Chart.yaml"].ID {
+		t.Fatalf("disabled dependency reference lost its compatible chart identity: %#v", reference)
+	}
+	for _, artifactPath := range []string{"platform/templates/use.yaml", "platform/charts/worker/templates/use.yaml"} {
+		for _, call := range artifacts[artifactPath].IaC.(*model.HelmTemplate).TemplateCalls {
+			if call.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], call.ID) {
+				t.Errorf("disabled render-tree call acquired target: %#v", call)
+			}
+		}
+	}
+}
+
+func TestResolveUsesRootScopedConditionForNestedDependency(t *testing.T) {
+	artifacts := map[string]*model.Artifact{
+		"root/Chart.yaml":                                         testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 2.x\n    repository: file://charts/worker\n"),
+		"root/values.yaml":                                        testArtifact(t, "root/values.yaml", "background:\n  sidecar:\n    enabled: false\n"),
+		"root/charts/worker/Chart.yaml":                           testArtifact(t, "root/charts/worker/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 2.4.1\ndependencies:\n  - name: helper\n    alias: sidecar\n    version: 1.x\n    repository: file://charts/helper\n    condition: sidecar.enabled\n"),
+		"root/charts/worker/charts/helper/Chart.yaml":             testArtifact(t, "root/charts/worker/charts/helper/Chart.yaml", "apiVersion: v2\nname: helper\nversion: 1.2.0\n"),
+		"root/charts/worker/charts/helper/templates/_helpers.tpl": testArtifact(t, "root/charts/worker/charts/helper/templates/_helpers.tpl", "{{ define \"nested.only\" }}nested{{ end }}\n"),
+		"root/charts/worker/charts/helper/templates/use.yaml":     testArtifact(t, "root/charts/worker/charts/helper/templates/use.yaml", "{{ include \"nested.only\" . }}\n"),
+	}
+	app := parseL1Application(t, artifacts, nil)
+	delta, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Apply(app, delta); err != nil {
+		t.Fatal(err)
+	}
+	call := onlyTemplateCall(t, artifacts["root/charts/worker/charts/helper/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+	if call.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], call.ID) {
+		t.Fatalf("root-disabled nested dependency call acquired target: %#v", call)
+	}
+}
+
+func TestResolveUsesAliasForHelmChartFullPathOrdering(t *testing.T) {
+	artifacts := map[string]*model.Artifact{
+		"root/Chart.yaml":                               testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n  - name: first\n    alias: z-alias\n    version: 1.x\n    repository: file://charts/physical-a\n  - name: second\n    alias: a-alias\n    version: 1.x\n    repository: file://charts/physical-z\n"),
+		"root/templates/use.yaml":                       testArtifact(t, "root/templates/use.yaml", "{{ include \"shared\" . }}\n"),
+		"root/charts/physical-a/Chart.yaml":             testArtifact(t, "root/charts/physical-a/Chart.yaml", "apiVersion: v2\nname: first\nversion: 1.2.0\n"),
+		"root/charts/physical-a/templates/_helpers.tpl": testArtifact(t, "root/charts/physical-a/templates/_helpers.tpl", "{{ define \"shared\" }}first{{ end }}\n"),
+		"root/charts/physical-z/Chart.yaml":             testArtifact(t, "root/charts/physical-z/Chart.yaml", "apiVersion: v2\nname: second\nversion: 1.2.0\n"),
+		"root/charts/physical-z/templates/_helpers.tpl": testArtifact(t, "root/charts/physical-z/templates/_helpers.tpl", "{{ define \"shared\" }}second{{ end }}\n"),
+	}
+	app := parseL1Application(t, artifacts, nil)
+	delta, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Apply(app, delta); err != nil {
+		t.Fatal(err)
+	}
+	winner := onlyNamedTemplate(t, artifacts["root/charts/physical-z/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "shared")
+	call := onlyTemplateCall(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+	if call.TargetID != winner.ID {
+		t.Fatalf("ChartFullPath alias-order winner = %q, want a-alias definition %q", call.TargetID, winner.ID)
+	}
+}
+
+func TestResolveRejectsRenderTreeWithSameFileNonEmptyDuplicate(t *testing.T) {
+	artifacts := map[string]*model.Artifact{
+		"invalid/Chart.yaml":             testArtifact(t, "invalid/Chart.yaml", "apiVersion: v2\nname: invalid\nversion: 1.0.0\n"),
+		"invalid/templates/_helpers.tpl": testArtifact(t, "invalid/templates/_helpers.tpl", "{{ define \"shared\" }}first{{ end }}\n{{ define \"shared\" }}second{{ end }}\n"),
+		"invalid/templates/_valid.tpl":   testArtifact(t, "invalid/templates/_valid.tpl", "{{ define \"valid\" }}valid{{ end }}\n"),
+		"invalid/templates/use.yaml":     testArtifact(t, "invalid/templates/use.yaml", "{{ include \"shared\" . }} {{ include \"valid\" . }}\n"),
+	}
+	app := parseL1Application(t, artifacts, nil)
+	invalidFacet := artifacts["invalid/templates/_helpers.tpl"].IaC.(*model.HelmTemplate)
+	if len(invalidFacet.NamedTemplates) != 2 {
+		t.Fatalf("L1 same-file declarations = %d, want both retained", len(invalidFacet.NamedTemplates))
+	}
+	assertDiagnosticCode(t, app, helmDuplicateTemplateDefinitionCode)
+	delta, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Apply(app, delta); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range artifacts["invalid/templates/use.yaml"].IaC.(*model.HelmTemplate).TemplateCalls {
+		if call.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], call.ID) {
+			t.Errorf("failed render set call acquired target: %#v", call)
+		}
+	}
+}
+
+func TestResolveSameFileEmptyAndNonEmptyDefinitionsUseNonEmptyDefinition(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{name: "empty then nonempty", source: "{{ define \"shared\" }} {{/* empty */}} {{ end }}\n{{ define \"shared\" }}nonempty{{ end }}\n"},
+		{name: "nonempty then empty", source: "{{ define \"shared\" }}nonempty{{ end }}\n{{ define \"shared\" }} {{/* empty */}} {{ end }}\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := map[string]*model.Artifact{
+				"valid/Chart.yaml":             testArtifact(t, "valid/Chart.yaml", "apiVersion: v2\nname: valid\nversion: 1.0.0\n"),
+				"valid/templates/_helpers.tpl": testArtifact(t, "valid/templates/_helpers.tpl", test.source),
+				"valid/templates/use.yaml":     testArtifact(t, "valid/templates/use.yaml", "{{ include \"shared\" . }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			facet := artifacts["valid/templates/_helpers.tpl"].IaC.(*model.HelmTemplate)
+			var nonempty *model.HelmNamedTemplate
+			for _, definition := range facet.NamedTemplates {
+				if strings.Contains(artifacts["valid/templates/_helpers.tpl"].Source[definition.Span.Bytes[0]:definition.Span.Bytes[1]], "nonempty") {
+					nonempty = definition
+				}
+			}
+			if nonempty == nil {
+				t.Fatal("non-empty L1 definition not found")
+			}
+			delta, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := model.Apply(app, delta); err != nil {
+				t.Fatal(err)
+			}
+			call := onlyTemplateCall(t, artifacts["valid/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			if call.TargetID != nonempty.ID {
+				t.Fatalf("target = %q, want non-empty same-file definition %q", call.TargetID, nonempty.ID)
+			}
+		})
+	}
+}
+
 func TestResolvePinnedHelmLoadOrderDoesNotLetEmptyDefinitionOverride(t *testing.T) {
 	artifacts := map[string]*model.Artifact{
 		"empty/Chart.yaml":         testArtifact(t, "empty/Chart.yaml", "apiVersion: v2\nname: empty\nversion: 1.0.0\n"),
@@ -221,6 +511,28 @@ func TestResolvePinnedHelmLoadOrderDoesNotLetEmptyDefinitionOverride(t *testing.
 	call := onlyTemplateCall(t, artifacts["empty/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
 	if call.TargetID != winner.ID {
 		t.Fatalf("empty later definition replaced existing non-empty definition: target=%q want=%q", call.TargetID, winner.ID)
+	}
+}
+
+func TestResolvePinnedHelmLoadOrderKeepsFirstCrossFileEmptyDefinition(t *testing.T) {
+	artifacts := map[string]*model.Artifact{
+		"empty/Chart.yaml":         testArtifact(t, "empty/Chart.yaml", "apiVersion: v2\nname: empty\nversion: 1.0.0\n"),
+		"empty/templates/_a.tpl":   testArtifact(t, "empty/templates/_a.tpl", "{{ define \"shared\" }} {{/* a */}} {{ end }}\n"),
+		"empty/templates/_z.tpl":   testArtifact(t, "empty/templates/_z.tpl", "{{ define \"shared\" }} {{/* z */}} {{ end }}\n"),
+		"empty/templates/use.yaml": testArtifact(t, "empty/templates/use.yaml", "{{ include \"shared\" . }}\n"),
+	}
+	app := parseL1Application(t, artifacts, nil)
+	delta, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Apply(app, delta); err != nil {
+		t.Fatal(err)
+	}
+	winner := onlyNamedTemplate(t, artifacts["empty/templates/_z.tpl"].IaC.(*model.HelmTemplate), "shared")
+	call := onlyTemplateCall(t, artifacts["empty/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+	if call.TargetID != winner.ID {
+		t.Fatalf("cross-file empty winner = %q, want first parsed definition %q", call.TargetID, winner.ID)
 	}
 }
 
@@ -293,6 +605,63 @@ func TestResolveToleratesMalformedPartialL1AndHonorsContext(t *testing.T) {
 	if delta, err := New().Resolve(context.Background(), nil); err != nil || !reflect.DeepEqual(delta, model.Delta{}) {
 		t.Fatalf("Frontend.Resolve(nil) = %#v, %v", delta, err)
 	}
+}
+
+func TestResolveChartIndexScalesWithoutCubicOwnershipScans(t *testing.T) {
+	measure := func(chartCount int) time.Duration {
+		app := syntheticChartApplication(chartCount)
+		started := time.Now()
+		if _, err := resolve(app); err != nil {
+			t.Fatal(err)
+		}
+		return time.Since(started)
+	}
+	small := measure(100)
+	large := measure(200)
+	if large > 500*time.Millisecond && large > 6*small {
+		t.Fatalf("resolution growth indicates repeated chart ownership scans: 100 charts=%s, 200 charts=%s", small, large)
+	}
+}
+
+func TestResolveLargeChartIndexHonorsPromptCancellation(t *testing.T) {
+	app := syntheticChartApplication(20_000)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	delta, err := resolveContext(ctx, app)
+	if !errors.Is(err, context.Canceled) || !reflect.DeepEqual(delta, model.Delta{}) {
+		t.Fatalf("resolveContext(cancelled) = %#v, %v, want empty delta and context.Canceled", delta, err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("pre-cancelled large resolution took %s", elapsed)
+	}
+}
+
+func syntheticChartApplication(chartCount int) *model.Application {
+	app := &model.Application{ID: "can://application/scaling", Kind: "application", Artifacts: map[string]*model.Artifact{}}
+	for index := 0; index < chartCount; index++ {
+		artifactPath := fmt.Sprintf("charts/chart-%06d/Chart.yaml", index)
+		artifactID, err := model.ArtifactID("scaling", artifactPath)
+		if err != nil {
+			panic(err)
+		}
+		app.Artifacts[artifactPath] = &model.Artifact{
+			ID:   artifactID,
+			Kind: "artifact",
+			Path: artifactPath,
+			IaC: &model.HelmChart{
+				Dialect:      "helm",
+				Kind:         "helm_chart",
+				Status:       "complete",
+				APIVersion:   "v2",
+				Name:         fmt.Sprintf("chart-%06d", index),
+				Version:      "1.0.0",
+				Dependencies: map[string]*model.HelmDependency{},
+				Renders:      map[string]*model.HelmRender{},
+			},
+		}
+	}
+	return app
 }
 
 func TestResolveEmitsPURLOnlyForSemanticallyRepresentableOCIRepositories(t *testing.T) {
@@ -382,6 +751,17 @@ func onlyTemplateCall(t *testing.T, template *model.HelmTemplate, kind string) *
 	}
 	t.Fatalf("no %s call", kind)
 	return nil
+}
+
+func sortedTemplateCalls(facet *model.HelmTemplate) []*model.HelmTemplateCall {
+	calls := make([]*model.HelmTemplateCall, 0, len(facet.TemplateCalls))
+	for _, call := range facet.TemplateCalls {
+		if call != nil {
+			calls = append(calls, call)
+		}
+	}
+	sort.Slice(calls, func(i, j int) bool { return calls[i].ID < calls[j].ID })
+	return calls
 }
 
 func hasEdge(t *testing.T, app *model.Application, relationship model.Relationship, src, dst string) bool {

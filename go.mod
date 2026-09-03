@@ -3,6 +3,7 @@ module github.com/codellm-devkit/codeanalyzer-iac
 go 1.26.0
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/dlclark/regexp2 v1.11.0
 	github.com/goccy/go-yaml v1.19.2
@@ -18,7 +19,6 @@ require (
 require (
 	dario.cat/mergo v1.0.1 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
-	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
