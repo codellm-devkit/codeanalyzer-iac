@@ -2,11 +2,13 @@ package helm
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/dialect"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
@@ -27,7 +29,7 @@ func TestTemplateParsesExactSourceFacts(t *testing.T) {
 			ID:   "can://iac/test-app/helm/charts/sample/templates/deployment.yaml/named-template/inline.helper",
 			Kind: "helm_named_template",
 			Name: "inline.helper",
-			Span: model.Span{Start: [2]int{26, 1}, End: [2]int{28, 12}, Bytes: [2]int{724, 773}},
+			Span: model.Span{Start: [2]int{26, 1}, End: [2]int{28, 12}, Bytes: [2]int{722, 771}},
 		},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("named templates = %#v, want %#v", got, want)
@@ -52,7 +54,7 @@ func TestTemplateParsesExactSourceFacts(t *testing.T) {
 		},
 		"24:13": {
 			ID: "can://iac/test-app/helm/charts/sample/templates/deployment.yaml/template-call@24:13", Kind: "helm_template_call", CallKind: "include", NameExpression: "sample.fullname",
-			Span: model.Span{Start: [2]int{24, 13}, End: [2]int{24, 99}, Bytes: [2]int{626, 712}},
+			Span: model.Span{Start: [2]int{24, 13}, End: [2]int{24, 97}, Bytes: [2]int{626, 710}},
 		},
 	}
 	if !reflect.DeepEqual(facet.TemplateCalls, wantCalls) {
@@ -89,7 +91,7 @@ func TestTemplateParsesExactSourceFacts(t *testing.T) {
 		},
 		"16:1": {
 			ID: "can://iac/test-app/helm/charts/sample/templates/deployment.yaml/resource-template@16:1", Kind: "helm_resource_template", DocumentIndex: 1,
-			Span: model.Span{Start: [2]int{16, 1}, End: [2]int{25, 11}, Bytes: [2]int{410, 723}},
+			Span: model.Span{Start: [2]int{16, 1}, End: [2]int{25, 11}, Bytes: [2]int{410, 721}},
 		},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("resource templates = %#v, want %#v", got, want)
@@ -98,8 +100,8 @@ func TestTemplateParsesExactSourceFacts(t *testing.T) {
 	if got, want := facet.LookupReferences, map[string]*model.HelmLookupReference{
 		"24:13": {
 			ID: "can://iac/test-app/helm/charts/sample/templates/deployment.yaml/lookup-reference@24:13", Kind: "helm_lookup_reference",
-			GroupExpression: "\"apps\"", VersionExpression: "\"v1\"", ResourceKindExpression: "\"Deployment\"", NamespaceExpression: ".Release.Namespace", NameExpression: "include \"sample.fullname\" .",
-			Span: model.Span{Start: [2]int{24, 13}, End: [2]int{24, 99}, Bytes: [2]int{626, 712}},
+			GroupExpression: "apps", VersionExpression: "v1", ResourceKindExpression: "\"Deployment\"", NamespaceExpression: ".Release.Namespace", NameExpression: "include \"sample.fullname\" .",
+			Span: model.Span{Start: [2]int{24, 13}, End: [2]int{24, 97}, Bytes: [2]int{626, 710}},
 		},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("lookup references = %#v, want %#v", got, want)
@@ -239,6 +241,39 @@ func TestTemplateAcceptsCompleteSafeFunctionMapWithoutExecution(t *testing.T) {
 	}
 	if len(facet.LookupReferences) != 1 {
 		t.Fatalf("lookup references = %#v", facet.LookupReferences)
+	}
+}
+
+func TestTemplateAcceptsPinnedHelmFunctionNamesWithoutExecution(t *testing.T) {
+	tests := []struct {
+		name   string
+		action string
+	}{
+		{"toToml", `{{ toToml (dict "a" 1) }}`},
+		{"mustToToml", `{{ mustToToml (dict "a" 1) }}`},
+		{"fromToml", `{{ fromToml "a = 1" }}`},
+		{"toYaml", `{{ toYaml (dict "a" 1) }}`},
+		{"mustToYaml", `{{ mustToYaml (dict "a" 1) }}`},
+		{"toYamlPretty", `{{ toYamlPretty (dict "a" 1) }}`},
+		{"fromYaml", `{{ fromYaml "a: 1" }}`},
+		{"fromYamlArray", `{{ fromYamlArray "- a" }}`},
+		{"toJson", `{{ toJson (dict "a" 1) }}`},
+		{"mustToJson", `{{ mustToJson (dict "a" 1) }}`},
+		{"fromJson", `{{ fromJson "{\"a\":1}" }}`},
+		{"fromJsonArray", `{{ fromJsonArray "[1]" }}`},
+		{"include", `{{ include "sample.name" . }}`},
+		{"tpl", `{{ tpl "value" . }}`},
+		{"required", `{{ required "needed" .Values.a }}`},
+		{"lookup", `{{ lookup "v1" "Namespace" "" "default" }}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifact := testArtifact(t, "charts/sample/templates/function-"+test.name+".yaml", test.action+"\n")
+			facet, diagnostics := parseTemplate(artifact, dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"resource"}})
+			if facet.Status != "complete" || len(diagnostics) != 0 {
+				t.Fatalf("facet=%#v diagnostics=%#v", facet, diagnostics)
+			}
+		})
 	}
 }
 
@@ -393,4 +428,206 @@ func TestTemplateDocumentMarkerRequiresSeparationWhitespace(t *testing.T) {
 	if len(facet.ResourceTemplates) != 1 || resource == nil || resource.DocumentIndex != 0 || resource.Span.Bytes != [2]int{0, len(source)} {
 		t.Fatalf("resource templates = %#v, want one unsplit source document", facet.ResourceTemplates)
 	}
+}
+
+func TestTemplateLookupUsesHelmFourArgumentContract(t *testing.T) {
+	source := "{{ lookup \"apps/v1\" \"Deployment\" .Release.Namespace \"name\" }}\n" +
+		"{{ lookup \"v1\" \"Secret\" \"\" \"core\" }}\n" +
+		"{{ lookup .Values.lookup.apiVersion .Values.lookup.kind .Release.Namespace (include \"sample.name\" .) }}\n"
+	artifact := testArtifact(t, "charts/sample/templates/lookups.yaml", source)
+	facet, diagnostics := parseTemplate(artifact, dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"resource"}})
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	want := map[string]*model.HelmLookupReference{
+		"1:1": {
+			ID: "can://iac/test-app/helm/charts/sample/templates/lookups.yaml/lookup-reference@1:1", Kind: "helm_lookup_reference",
+			GroupExpression: "apps", VersionExpression: "v1", ResourceKindExpression: `"Deployment"`, NamespaceExpression: ".Release.Namespace", NameExpression: `"name"`,
+			Span: model.Span{Start: [2]int{1, 1}, End: [2]int{1, 62}, Bytes: [2]int{0, 61}},
+		},
+		"2:1": {
+			ID: "can://iac/test-app/helm/charts/sample/templates/lookups.yaml/lookup-reference@2:1", Kind: "helm_lookup_reference",
+			GroupExpression: "", VersionExpression: "v1", ResourceKindExpression: `"Secret"`, NamespaceExpression: `""`, NameExpression: `"core"`,
+			Span: model.Span{Start: [2]int{2, 1}, End: [2]int{2, 37}, Bytes: [2]int{62, 98}},
+		},
+		"3:1": {
+			ID: "can://iac/test-app/helm/charts/sample/templates/lookups.yaml/lookup-reference@3:1", Kind: "helm_lookup_reference",
+			GroupExpression: "", VersionExpression: ".Values.lookup.apiVersion", ResourceKindExpression: ".Values.lookup.kind", NamespaceExpression: ".Release.Namespace", NameExpression: `include "sample.name" .`,
+			Span: model.Span{Start: [2]int{3, 1}, End: [2]int{3, 104}, Bytes: [2]int{99, 202}},
+		},
+	}
+	if !reflect.DeepEqual(facet.LookupReferences, want) {
+		for key, wantReference := range want {
+			gotReference := facet.LookupReferences[key]
+			if gotReference == nil || !reflect.DeepEqual(gotReference, wantReference) {
+				t.Errorf("lookup %s = %#v, want %#v", key, gotReference, wantReference)
+			}
+		}
+	}
+}
+
+func TestTemplateWalksNestedBlockBodyExactlyOnce(t *testing.T) {
+	source := "{{ define \"outer\" }}\n" +
+		"{{ block \"nested\" . }}\n" +
+		"{{ include \"sample.name\" . }}\n" +
+		"{{ .Values.nested.value }}\n" +
+		"{{ index .Values.nested \"items\" 0 }}\n" +
+		"{{ .Values.nested.value }}\n" +
+		"{{ end }}\n" +
+		"{{ end }}\n"
+	artifact := testArtifact(t, "charts/sample/templates/nested-block.tpl", source)
+	facet, diagnostics := parseTemplate(artifact, dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"helper"}})
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	if len(facet.NamedTemplates) != 2 || facet.NamedTemplates["outer"] == nil || facet.NamedTemplates["nested"] == nil {
+		t.Fatalf("named templates = %#v, want outer and nested", facet.NamedTemplates)
+	}
+	wantCalls := map[string]struct {
+		kind string
+		name string
+	}{
+		"2:1": {"block", "nested"},
+		"3:1": {"include", "sample.name"},
+	}
+	if len(facet.TemplateCalls) != len(wantCalls) {
+		t.Fatalf("template calls = %#v, want exactly %#v", facet.TemplateCalls, wantCalls)
+	}
+	for key, want := range wantCalls {
+		call := facet.TemplateCalls[key]
+		if call == nil || call.CallKind != want.kind || call.NameExpression != want.name {
+			t.Errorf("template call %s = %#v, want kind=%q name=%q", key, call, want.kind, want.name)
+		}
+	}
+	wantValues := map[string]string{
+		"4:1": "nested.value",
+		"5:1": "nested.items.0",
+		"6:1": "nested.value",
+	}
+	if len(facet.ValueReferences) != len(wantValues) {
+		t.Fatalf("value references = %#v, want exactly %#v", facet.ValueReferences, wantValues)
+	}
+	for key, want := range wantValues {
+		reference := facet.ValueReferences[key]
+		if reference == nil || reference.PathExpression != want {
+			t.Errorf("value reference %s = %#v, want %q", key, reference, want)
+		}
+	}
+}
+
+func TestTemplateDeclarationKeysRemainInjectiveForArbitraryNames(t *testing.T) {
+	source := "{{ define \"foo\" }}first{{ end }}\n" +
+		"{{ define \"foo@1:1\" }}literal{{ end }}\n" +
+		"{{ define \"foo\" }}second{{ end }}\n"
+	artifact := testArtifact(t, "charts/sample/templates/key-collision.tpl", source)
+	app := parseAndValidate(t, artifact, dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"helper"}})
+	facet := app.Artifacts[artifact.Path].IaC.(*model.HelmTemplate)
+	want := map[string]struct {
+		name string
+		id   string
+	}{
+		"foo@1:1@1:1": {"foo", "can://iac/test-app/helm/charts/sample/templates/key-collision.tpl/named-template/foo@1:1"},
+		"foo@1:1@2:1": {"foo@1:1", "can://iac/test-app/helm/charts/sample/templates/key-collision.tpl/named-template/foo%401%3A1"},
+		"foo@3:1":     {"foo", "can://iac/test-app/helm/charts/sample/templates/key-collision.tpl/named-template/foo@3:1"},
+	}
+	if len(facet.NamedTemplates) != len(want) {
+		t.Fatalf("named templates = %#v, want exactly %#v", facet.NamedTemplates, want)
+	}
+	ids := map[string]bool{}
+	for key, expected := range want {
+		definition := facet.NamedTemplates[key]
+		if definition == nil || definition.Name != expected.name || definition.ID != expected.id {
+			t.Errorf("definition %q = %#v, want name=%q id=%q", key, definition, expected.name, expected.id)
+			continue
+		}
+		if ids[definition.ID] {
+			t.Errorf("duplicate definition ID %q", definition.ID)
+		}
+		ids[definition.ID] = true
+	}
+}
+
+func TestTemplateParsingScalesNearLinearly(t *testing.T) {
+	measure := func(actions int) time.Duration {
+		source := strings.Repeat("{{ .Values.item }}\n", actions)
+		artifact := testArtifact(t, "charts/sample/templates/generated.yaml", source)
+		started := time.Now()
+		facet, diagnostics := parseTemplate(artifact, dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"resource"}})
+		duration := time.Since(started)
+		if len(diagnostics) != 0 || len(facet.ValueReferences) != actions {
+			t.Fatalf("actions=%d references=%d diagnostics=%#v", actions, len(facet.ValueReferences), diagnostics)
+		}
+		return duration
+	}
+
+	small := measure(10_000)
+	large := measure(40_000)
+	if limit := small*8 + 25*time.Millisecond; large > limit {
+		t.Fatalf("40k actions took %s after 10k took %s; want <= %s", large, small, limit)
+	}
+}
+
+func TestTemplateFrontendCancellationInterruptsLargeParse(t *testing.T) {
+	source := strings.Repeat("{{ .Values.item }}\n", 80_000)
+	artifact := testArtifact(t, "charts/sample/templates/cancel.yaml", source)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := New().Parse(ctx, artifact, dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"resource"}})
+		done <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Parse() error = %v, want context cancellation", err)
+		}
+		if elapsed := time.Since(started); elapsed > 1500*time.Millisecond {
+			t.Fatalf("canceled parse returned after %s, want <= 1.5s", elapsed)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("canceled parse did not return within 1.5s")
+	}
+}
+
+func FuzzTemplateParser(f *testing.F) {
+	f.Add("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ include \"sample.name\" . }}\n")
+	f.Add("{{ define \"outer\" }}{{ block \"inner\" . }}{{ .Values.item }}{{ end }}{{ end }}")
+	f.Add("{{ lookup .Values.apiVersion \"Secret\" .Release.Namespace \"name\" }}")
+	f.Add("{{ if }}")
+	f.Fuzz(func(t *testing.T, source string) {
+		artifact := testArtifact(t, "charts/sample/templates/fuzz.yaml", source)
+		detection := dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"resource"}}
+		facet, diagnostics := parseTemplate(artifact, detection)
+		if facet == nil {
+			t.Fatal("parseTemplate() returned a nil facet")
+		}
+		repeatedFacet, repeatedDiagnostics := parseTemplate(artifact, detection)
+		if !reflect.DeepEqual(facet, repeatedFacet) || !reflect.DeepEqual(diagnostics, repeatedDiagnostics) {
+			t.Fatal("parseTemplate() produced nondeterministic facts")
+		}
+		assertSpan := func(name string, span model.Span) {
+			t.Helper()
+			if span.Bytes[0] < 0 || span.Bytes[1] < span.Bytes[0] || span.Bytes[1] > len(source) {
+				t.Fatalf("%s span %#v is outside %d source bytes", name, span, len(source))
+			}
+		}
+		for key, definition := range facet.NamedTemplates {
+			assertSpan("definition "+key, definition.Span)
+		}
+		for key, call := range facet.TemplateCalls {
+			assertSpan("call "+key, call.Span)
+		}
+		for key, reference := range facet.ValueReferences {
+			assertSpan("value "+key, reference.Span)
+		}
+		for key, resource := range facet.ResourceTemplates {
+			assertSpan("resource "+key, resource.Span)
+		}
+		for key, lookup := range facet.LookupReferences {
+			assertSpan("lookup "+key, lookup.Span)
+		}
+	})
 }

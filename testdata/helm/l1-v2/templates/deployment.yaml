@@ -21,7 +21,7 @@ metadata:
 data:
   rendered: {{ tpl "kind: ConfigMap" . }}
   dynamic: {{ tpl .Values.extraTemplate . }}
-  existing: {{ lookup "apps" "v1" "Deployment" .Release.Namespace (include "sample.fullname" .) }}
+  existing: {{ lookup "apps/v1" "Deployment" .Release.Namespace (include "sample.fullname" .) }}
 {{- end }}
 {{- define "inline.helper" -}}
 inline

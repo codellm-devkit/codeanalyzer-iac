@@ -1,6 +1,7 @@
 package helm
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sort"
@@ -20,6 +21,13 @@ const (
 	helmDuplicateTemplateDefinitionCode = "IAC_HELM_DUPLICATE_TEMPLATE_DEFINITION"
 )
 
+var helmEngineFunctionNames = []string{
+	"toToml", "mustToToml", "fromToml",
+	"toYaml", "mustToYaml", "toYamlPretty", "fromYaml", "fromYamlArray",
+	"toJson", "mustToJson", "fromJson", "fromJsonArray",
+	"include", "tpl", "required", "lookup",
+}
+
 type templateAction struct {
 	start     int
 	end       int
@@ -33,6 +41,17 @@ type templateAction struct {
 type templateDeclaration struct {
 	templateAction
 	close templateAction
+}
+
+type namedTemplateSourceFact struct {
+	preferredKey string
+	location     string
+	definition   *model.HelmNamedTemplate
+}
+
+type parsedTemplateDeclaration struct {
+	templateDeclaration
+	tree *parse.Tree
 }
 
 type templateFrame struct {
@@ -50,12 +69,20 @@ type templateFacts struct {
 	index            templateSourceIndex
 	actions          []templateAction
 	occurrenceCounts map[string]int
+	ctx              context.Context
+	walkSteps        int
+	err              error
 }
 
 // parseTemplate extracts only source-bounded L1 facts. It parses syntax but
 // never executes a template function, renders YAML, resolves a target, or
 // contacts a Kubernetes cluster.
 func parseTemplate(artifact *model.Artifact, detection dialect.Detection) (*model.HelmTemplate, []model.Diagnostic) {
+	facet, diagnostics, _ := parseTemplateContext(context.Background(), artifact, detection)
+	return facet, diagnostics
+}
+
+func parseTemplateContext(ctx context.Context, artifact *model.Artifact, detection dialect.Detection) (*model.HelmTemplate, []model.Diagnostic, error) {
 	facet := &model.HelmTemplate{
 		Dialect:           dialectName,
 		Kind:              "helm_template",
@@ -67,18 +94,28 @@ func parseTemplate(artifact *model.Artifact, detection dialect.Detection) (*mode
 		ResourceTemplates: map[string]*model.HelmResourceTemplate{},
 		LookupReferences:  map[string]*model.HelmLookupReference{},
 	}
+	if err := contextError(ctx); err != nil {
+		return nil, nil, err
+	}
 	if artifact == nil {
-		return facet, nil
+		return facet, nil, nil
 	}
 
-	actions := scanTemplateActions(artifact.Source)
-	declarations := matchTemplateDeclarations(actions)
+	actions, err := scanTemplateActions(ctx, artifact.Source)
+	if err != nil {
+		return nil, nil, err
+	}
+	declarations, err := matchTemplateDeclarations(ctx, actions)
+	if err != nil {
+		return nil, nil, err
+	}
 	facts := &templateFacts{
 		artifact:         artifact,
 		facet:            facet,
 		index:            newTemplateSourceIndex(artifact.Source),
 		actions:          actions,
 		occurrenceCounts: map[string]int{},
+		ctx:              ctx,
 	}
 	diagnostics := make([]model.Diagnostic, 0)
 	parseErrors := make([]string, 0)
@@ -86,35 +123,79 @@ func parseTemplate(artifact *model.Artifact, detection dialect.Detection) (*mode
 	// Definitions are parsed independently. Besides retaining duplicate source
 	// declarations, this lets one malformed root action degrade without erasing
 	// valid definitions elsewhere in the file.
-	validDeclarations := make([]templateDeclaration, 0, len(declarations))
+	validDeclarations := make([]parsedTemplateDeclaration, 0, len(declarations))
 	for index, declaration := range declarations {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, nil, err
+		}
 		snippet := artifact.Source[declaration.start:declaration.close.end]
 		trees, err := parse.Parse(fmt.Sprintf("definition-%d", index), snippet, "", "", helmTemplateFuncMap())
+		if contextErr := contextError(ctx); contextErr != nil {
+			return nil, nil, contextErr
+		}
 		if err != nil {
 			parseErrors = append(parseErrors, err.Error())
 			continue
 		}
-		if trees[declaration.name] == nil {
+		tree := trees[declaration.name]
+		if tree == nil {
 			parseErrors = append(parseErrors, fmt.Sprintf("template declaration %q did not produce a parse tree", declaration.name))
 			continue
 		}
-		validDeclarations = append(validDeclarations, declaration)
+		validDeclarations = append(validDeclarations, parsedTemplateDeclaration{templateDeclaration: declaration, tree: tree})
 	}
 
 	definitionCounts := map[string]int{}
-	for _, declaration := range validDeclarations {
+	for index, declaration := range validDeclarations {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, nil, err
+		}
 		definitionCounts[declaration.name]++
 	}
-	for _, declaration := range validDeclarations {
+	pendingDefinitions := make([]namedTemplateSourceFact, 0, len(validDeclarations))
+	preferredKeyCounts := map[string]int{}
+	definitionFirstSpans := map[string]model.Span{}
+	for index, declaration := range validDeclarations {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, nil, err
+		}
 		span := facts.index.span(declaration.start, declaration.close.end)
-		key := declaration.name
+		if _, exists := definitionFirstSpans[declaration.name]; !exists {
+			definitionFirstSpans[declaration.name] = span
+		}
+		preferredKey := declaration.name
 		id := semanticIDForArtifact(artifact, "named-template", declaration.name)
 		if definitionCounts[declaration.name] > 1 {
 			location := locationKey(span)
-			key += "@" + location
+			preferredKey += "@" + location
 			id += "@" + location
 		}
-		facet.NamedTemplates[key] = &model.HelmNamedTemplate{ID: id, Kind: "helm_named_template", Name: declaration.name, Span: span}
+		preferredKeyCounts[preferredKey]++
+		pendingDefinitions = append(pendingDefinitions, namedTemplateSourceFact{
+			preferredKey: preferredKey,
+			location:     locationKey(span),
+			definition:   &model.HelmNamedTemplate{ID: id, Kind: "helm_named_template", Name: declaration.name, Span: span},
+		})
+	}
+	reservedDefinitionKeys := make(map[string]bool, len(preferredKeyCounts))
+	for key := range preferredKeyCounts {
+		reservedDefinitionKeys[key] = true
+	}
+	usedDefinitionKeys := make(map[string]bool, len(pendingDefinitions))
+	for index, pending := range pendingDefinitions {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, nil, err
+		}
+		key := pending.preferredKey
+		if preferredKeyCounts[key] > 1 {
+			base := key + "@" + pending.location
+			key = base
+			for suffix := 2; reservedDefinitionKeys[key] || usedDefinitionKeys[key]; suffix++ {
+				key = base + ":" + strconv.Itoa(suffix)
+			}
+		}
+		facet.NamedTemplates[key] = pending.definition
+		usedDefinitionKeys[key] = true
 	}
 
 	for name, count := range definitionCounts {
@@ -122,45 +203,47 @@ func parseTemplate(artifact *model.Artifact, detection dialect.Detection) (*mode
 			continue
 		}
 		facet.Status = "partial"
-		var span *model.Span
-		for _, declaration := range validDeclarations {
-			if declaration.name == name {
-				value := facts.index.span(declaration.start, declaration.close.end)
-				span = &value
-				break
-			}
-		}
+		value := definitionFirstSpans[name]
+		span := &value
 		diagnostics = append(diagnostics, templateDiagnostic(artifact, helmDuplicateTemplateDefinitionCode, fmt.Sprintf("Helm named template %q is defined %d times in one artifact", name, count), span, name))
 	}
 
 	// Definitions are blanked without changing byte positions so duplicate
 	// names cannot make the standard parser discard the unrelated root tree.
 	rootSource := []byte(artifact.Source)
-	for _, declaration := range declarations {
+	for index, declaration := range declarations {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, nil, err
+		}
 		if declaration.keyword == "define" {
-			blankTemplateRange(rootSource, declaration.start, declaration.close.end)
+			if err := blankTemplateRange(ctx, rootSource, declaration.start, declaration.close.end); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	rootTrees, rootErr := parse.Parse(artifact.Path, string(rootSource), "", "", helmTemplateFuncMap())
+	if err := contextError(ctx); err != nil {
+		return nil, nil, err
+	}
 	if rootErr != nil {
 		parseErrors = append(parseErrors, rootErr.Error())
 	} else {
-		facts.walkTrees(rootTrees, 0)
+		facts.walkTree(rootTrees[artifact.Path], 0)
+		if facts.err != nil {
+			return nil, nil, facts.err
+		}
 	}
 
-	// Walk every valid define body from its isolated tree. Block bodies already
-	// appear in the successfully parsed root tree; on root failure the isolated
-	// block tree recovers both its call and its independently valid body.
+	// The root tree owns only root-level actions and block invocations. Every
+	// declaration owns its isolated named body, so nested block trees are walked
+	// exactly once instead of being skipped or revisited through an outer parse.
 	for index, declaration := range validDeclarations {
-		snippet := artifact.Source[declaration.start:declaration.close.end]
-		trees, err := parse.Parse(fmt.Sprintf("definition-%d", index), snippet, "", "", helmTemplateFuncMap())
-		if err != nil {
-			continue
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, nil, err
 		}
-		if declaration.keyword == "define" {
-			facts.walkTree(trees[declaration.name], declaration.start)
-		} else if rootErr != nil {
-			facts.walkTrees(trees, declaration.start)
+		facts.walkTree(declaration.tree, declaration.start)
+		if facts.err != nil {
+			return nil, nil, facts.err
 		}
 	}
 
@@ -169,7 +252,11 @@ func parseTemplate(artifact *model.Artifact, detection dialect.Detection) (*mode
 		sort.Strings(parseErrors)
 		diagnostics = append(diagnostics, templateDiagnostic(artifact, helmTemplateParseCode, strings.Join(uniqueStrings(parseErrors), "; "), nil, ""))
 	} else if resourceBearingRole(facet.Roles) {
-		for documentIndex, region := range resourceTemplateRegions(artifact.Source, actions, declarations) {
+		regions, err := resourceTemplateRegions(ctx, artifact.Source, actions, declarations)
+		if err != nil {
+			return nil, nil, err
+		}
+		for documentIndex, region := range regions {
 			span := facts.index.span(region[0], region[1])
 			key := locationKey(span)
 			id := model.AnonymousID(semanticIDForArtifact(artifact), "resource-template", span.Start[0], span.Start[1])
@@ -178,7 +265,10 @@ func parseTemplate(artifact *model.Artifact, detection dialect.Detection) (*mode
 	}
 
 	sort.Slice(diagnostics, func(i, j int) bool { return diagnostics[i].ID < diagnostics[j].ID })
-	return facet, diagnostics
+	if err := contextError(ctx); err != nil {
+		return nil, nil, err
+	}
+	return facet, diagnostics, nil
 }
 
 func helmTemplateFuncMap() map[string]any {
@@ -189,22 +279,36 @@ func helmTemplateFuncMap() map[string]any {
 	stub := func(...any) any { return nil }
 	for _, name := range []string{
 		"and", "call", "html", "index", "slice", "js", "len", "not", "or", "print", "printf", "println", "urlquery", "eq", "ge", "gt", "le", "lt", "ne",
-		"include", "tpl", "required", "lookup", "toYaml", "fromYaml", "fromYamlArray", "toToml", "fromJson", "fromJsonArray",
 	} {
+		functions[name] = stub
+	}
+	for _, name := range helmEngineFunctionNames {
 		functions[name] = stub
 	}
 	return functions
 }
 
-func scanTemplateActions(source string) []templateAction {
+func checkTemplateContext(ctx context.Context, iteration int) error {
+	if iteration%256 != 0 {
+		return nil
+	}
+	return contextError(ctx)
+}
+
+func scanTemplateActions(ctx context.Context, source string) ([]templateAction, error) {
 	actions := make([]templateAction, 0)
 	for offset := 0; offset+1 < len(source); {
-		relative := strings.Index(source[offset:], "{{")
-		if relative < 0 {
+		start, found, err := findTemplateDelimiter(ctx, source, offset, '{', '{')
+		if err != nil {
+			return nil, err
+		}
+		if !found {
 			break
 		}
-		start := offset + relative
-		end, ok := templateActionEnd(source, start)
+		end, ok, err := templateActionEnd(ctx, source, start)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			break
 		}
@@ -212,10 +316,22 @@ func scanTemplateActions(source string) []templateAction {
 		actions = append(actions, action)
 		offset = end
 	}
-	return actions
+	return actions, contextError(ctx)
 }
 
-func templateActionEnd(source string, start int) (int, bool) {
+func findTemplateDelimiter(ctx context.Context, source string, start int, first, second byte) (int, bool, error) {
+	for index := start; index+1 < len(source); index++ {
+		if err := checkTemplateContext(ctx, index-start); err != nil {
+			return 0, false, err
+		}
+		if source[index] == first && source[index+1] == second {
+			return index, true, nil
+		}
+	}
+	return 0, false, contextError(ctx)
+}
+
+func templateActionEnd(ctx context.Context, source string, start int) (int, bool, error) {
 	contentStart := start + 2
 	probe := strings.TrimLeft(source[contentStart:], " \t\r\n")
 	if strings.HasPrefix(probe, "-") {
@@ -223,21 +339,30 @@ func templateActionEnd(source string, start int) (int, bool) {
 	}
 	if strings.HasPrefix(probe, "/*") {
 		commentStart := len(source) - len(probe)
-		closeComment := strings.Index(source[commentStart+2:], "*/")
-		if closeComment < 0 {
-			return 0, false
+		closeComment, found, err := findTemplateDelimiter(ctx, source, commentStart+2, '*', '/')
+		if err != nil {
+			return 0, false, err
 		}
-		searchStart := commentStart + 2 + closeComment + 2
-		closeAction := strings.Index(source[searchStart:], "}}")
-		if closeAction < 0 {
-			return 0, false
+		if !found {
+			return 0, false, nil
 		}
-		return searchStart + closeAction + 2, true
+		searchStart := closeComment + 2
+		closeAction, found, err := findTemplateDelimiter(ctx, source, searchStart, '}', '}')
+		if err != nil {
+			return 0, false, err
+		}
+		if !found {
+			return 0, false, nil
+		}
+		return closeAction + 2, true, nil
 	}
 
 	var quote byte
 	escaped := false
 	for index := contentStart; index+1 < len(source); index++ {
+		if err := checkTemplateContext(ctx, index-contentStart); err != nil {
+			return 0, false, err
+		}
 		character := source[index]
 		if quote != 0 {
 			if quote == '`' {
@@ -264,10 +389,10 @@ func templateActionEnd(source string, start int) (int, bool) {
 			continue
 		}
 		if character == '}' && source[index+1] == '}' {
-			return index + 2, true
+			return index + 2, true, nil
 		}
 	}
-	return 0, false
+	return 0, false, contextError(ctx)
 }
 
 func classifyTemplateAction(source string, start, end int) templateAction {
@@ -323,10 +448,13 @@ func templateDeclarationName(value string) string {
 	return ""
 }
 
-func matchTemplateDeclarations(actions []templateAction) []templateDeclaration {
+func matchTemplateDeclarations(ctx context.Context, actions []templateAction) ([]templateDeclaration, error) {
 	stack := make([]templateFrame, 0)
 	declarations := make([]templateDeclaration, 0)
-	for _, action := range actions {
+	for index, action := range actions {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, err
+		}
 		switch action.keyword {
 		case "define", "block", "if", "range", "with":
 			stack = append(stack, templateFrame{action: action})
@@ -342,15 +470,19 @@ func matchTemplateDeclarations(actions []templateAction) []templateDeclaration {
 		}
 	}
 	sort.Slice(declarations, func(i, j int) bool { return declarations[i].start < declarations[j].start })
-	return declarations
+	return declarations, contextError(ctx)
 }
 
-func blankTemplateRange(source []byte, start, end int) {
+func blankTemplateRange(ctx context.Context, source []byte, start, end int) error {
 	for index := start; index < end && index < len(source); index++ {
+		if err := checkTemplateContext(ctx, index-start); err != nil {
+			return err
+		}
 		if source[index] != '\n' && source[index] != '\r' {
 			source[index] = ' '
 		}
 	}
+	return contextError(ctx)
 }
 
 func newTemplateSourceIndex(source string) templateSourceIndex {
@@ -382,25 +514,25 @@ func (index templateSourceIndex) span(start, end int) model.Span {
 	return model.Span{Start: index.position(start), End: index.position(end), Bytes: [2]int{start, end}}
 }
 
-func (facts *templateFacts) walkTrees(trees map[string]*parse.Tree, baseOffset int) {
-	names := make([]string, 0, len(trees))
-	for name := range trees {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		facts.walkTree(trees[name], baseOffset)
-	}
-}
-
 func (facts *templateFacts) walkTree(tree *parse.Tree, baseOffset int) {
 	if tree != nil {
 		facts.walkNode(tree.Root, baseOffset, nil)
 	}
 }
 
+func (facts *templateFacts) stopRequested() bool {
+	if facts.err != nil {
+		return true
+	}
+	facts.walkSteps++
+	if facts.walkSteps%256 == 0 {
+		facts.err = contextError(facts.ctx)
+	}
+	return facts.err != nil
+}
+
 func (facts *templateFacts) walkNode(node parse.Node, baseOffset int, enclosing *templateAction) {
-	if node == nil || reflect.ValueOf(node).Kind() == reflect.Pointer && reflect.ValueOf(node).IsNil() {
+	if facts.stopRequested() || node == nil || reflect.ValueOf(node).Kind() == reflect.Pointer && reflect.ValueOf(node).IsNil() {
 		return
 	}
 	switch typed := node.(type) {
@@ -494,11 +626,11 @@ func (facts *templateFacts) walkCommand(command *parse.CommandNode, baseOffset i
 
 func (facts *templateFacts) actionForNode(node parse.Node, baseOffset int) *templateAction {
 	position := baseOffset + int(node.Position()) - 1
-	for index := range facts.actions {
-		action := &facts.actions[index]
-		if action.start <= position && position < action.end {
-			return action
-		}
+	index := sort.Search(len(facts.actions), func(candidate int) bool {
+		return facts.actions[candidate].end > position
+	})
+	if index < len(facts.actions) && facts.actions[index].start <= position {
+		return &facts.actions[index]
 	}
 	return nil
 }
@@ -533,8 +665,19 @@ func (facts *templateFacts) addLookupReference(command *parse.CommandNode, actio
 		}
 		return expressionText(command.Args[index])
 	}
+	groupExpression := ""
+	versionExpression := argument(1)
+	if command != nil && len(command.Args) > 1 {
+		if apiVersion, ok := command.Args[1].(*parse.StringNode); ok {
+			versionExpression = apiVersion.Text
+			if group, version, grouped := strings.Cut(apiVersion.Text, "/"); grouped {
+				groupExpression = group
+				versionExpression = version
+			}
+		}
+	}
 	facts.facet.LookupReferences[key] = &model.HelmLookupReference{
-		ID: id, Kind: "helm_lookup_reference", GroupExpression: argument(1), VersionExpression: argument(2), ResourceKindExpression: argument(3), NamespaceExpression: argument(4), NameExpression: argument(5), Span: span,
+		ID: id, Kind: "helm_lookup_reference", GroupExpression: groupExpression, VersionExpression: versionExpression, ResourceKindExpression: argument(2), NamespaceExpression: argument(3), NameExpression: argument(4), Span: span,
 	}
 }
 
@@ -689,25 +832,56 @@ func resourceBearingRole(roles []string) bool {
 	return false
 }
 
-func resourceTemplateRegions(source string, actions []templateAction, declarations []templateDeclaration) [][2]int {
-	boundaries := yamlDocumentBoundaries(source, actions, declarations)
+func resourceTemplateRegions(ctx context.Context, source string, actions []templateAction, declarations []templateDeclaration) ([][2]int, error) {
+	boundaries, err := yamlDocumentBoundaries(ctx, source, actions, declarations)
+	if err != nil {
+		return nil, err
+	}
+	definitionRanges, err := declarationOutputRanges(ctx, source, declarations)
+	if err != nil {
+		return nil, err
+	}
+	meaningfulOffsets, err := meaningfulResourceOffsets(ctx, source, actions, declarations)
+	if err != nil {
+		return nil, err
+	}
 	regions := make([][2]int, 0, len(boundaries)+1)
 	start := 0
-	for _, boundary := range boundaries {
-		if region, ok := sourceDocumentRegion(source, start, boundary[0], actions, declarations); ok {
+	for index, boundary := range boundaries {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, err
+		}
+		region, ok, err := sourceDocumentRegion(ctx, source, start, boundary[0], definitionRanges, meaningfulOffsets)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			regions = append(regions, region)
 		}
 		start = boundary[1]
 	}
-	if region, ok := sourceDocumentRegion(source, start, len(source), actions, declarations); ok {
+	region, ok, err := sourceDocumentRegion(ctx, source, start, len(source), definitionRanges, meaningfulOffsets)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
 		regions = append(regions, region)
 	}
-	return regions
+	return regions, contextError(ctx)
 }
 
-func yamlDocumentBoundaries(source string, actions []templateAction, declarations []templateDeclaration) [][2]int {
+func yamlDocumentBoundaries(ctx context.Context, source string, actions []templateAction, declarations []templateDeclaration) ([][2]int, error) {
 	boundaries := make([][2]int, 0)
-	for start := 0; start < len(source); {
+	definitionRanges, err := nonRenderingDefinitionRanges(ctx, declarations)
+	if err != nil {
+		return nil, err
+	}
+	actionCursor := 0
+	definitionCursor := 0
+	for start, lineNumber := 0, 0; start < len(source); lineNumber++ {
+		if err := checkTemplateContext(ctx, lineNumber); err != nil {
+			return nil, err
+		}
 		lineEnd := strings.IndexByte(source[start:], '\n')
 		next := len(source)
 		if lineEnd >= 0 {
@@ -721,21 +895,33 @@ func yamlDocumentBoundaries(source string, actions []templateAction, declaration
 			contentEnd--
 		}
 		line := source[start:contentEnd]
-		if isYAMLDocumentMarker(line) && !insideTemplateAction(start, actions) && !insideNonRenderingDefinition(start, declarations) {
+		for actionCursor < len(actions) && actions[actionCursor].end <= start {
+			actionCursor++
+		}
+		for definitionCursor < len(definitionRanges) && definitionRanges[definitionCursor][1] <= start {
+			definitionCursor++
+		}
+		insideAction := actionCursor < len(actions) && actions[actionCursor].start <= start
+		insideDefinition := definitionCursor < len(definitionRanges) && definitionRanges[definitionCursor][0] <= start
+		if isYAMLDocumentMarker(line) && !insideAction && !insideDefinition {
 			boundaries = append(boundaries, [2]int{start, next})
 		}
 		start = next
 	}
-	return boundaries
+	return boundaries, contextError(ctx)
 }
 
-func insideNonRenderingDefinition(offset int, declarations []templateDeclaration) bool {
-	for _, declaration := range declarations {
-		if declaration.keyword == "define" && declaration.start <= offset && offset < declaration.close.end {
-			return true
+func nonRenderingDefinitionRanges(ctx context.Context, declarations []templateDeclaration) ([][2]int, error) {
+	ranges := make([][2]int, 0, len(declarations))
+	for index, declaration := range declarations {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, err
+		}
+		if declaration.keyword == "define" {
+			ranges = append(ranges, [2]int{declaration.start, declaration.close.end})
 		}
 	}
-	return false
+	return mergeTemplateRanges(ctx, ranges)
 }
 
 func isYAMLDocumentMarker(line string) bool {
@@ -749,45 +935,52 @@ func isYAMLDocumentMarker(line string) bool {
 	return rest == "" || strings.HasPrefix(rest, "#")
 }
 
-func insideTemplateAction(offset int, actions []templateAction) bool {
-	for _, action := range actions {
-		if action.start <= offset && offset < action.end {
-			return true
+func sourceDocumentRegion(ctx context.Context, source string, start, end int, definitionRanges [][2]int, meaningfulOffsets []int) ([2]int, bool, error) {
+	for iteration := 0; ; iteration++ {
+		if err := checkTemplateContext(ctx, iteration); err != nil {
+			return [2]int{}, false, err
 		}
+		index := sort.Search(len(definitionRanges), func(candidate int) bool {
+			return definitionRanges[candidate][1] > start
+		})
+		if index >= len(definitionRanges) {
+			break
+		}
+		definition := definitionRanges[index]
+		if definition[0] >= end || definition[1] > end || definition[0] > start && !onlyTemplateWhitespace(source[start:definition[0]]) {
+			break
+		}
+		start = definition[1]
 	}
-	return false
+	for iteration := 0; ; iteration++ {
+		if err := checkTemplateContext(ctx, iteration); err != nil {
+			return [2]int{}, false, err
+		}
+		index := sort.Search(len(definitionRanges), func(candidate int) bool {
+			return definitionRanges[candidate][0] >= end
+		}) - 1
+		if index < 0 {
+			break
+		}
+		definition := definitionRanges[index]
+		if definition[1] <= start || definition[0] < start || definition[1] < end && !onlyTemplateWhitespace(source[definition[1]:end]) {
+			break
+		}
+		end = definition[0]
+	}
+	meaningful := sort.SearchInts(meaningfulOffsets, start)
+	if start >= end || meaningful >= len(meaningfulOffsets) || meaningfulOffsets[meaningful] >= end {
+		return [2]int{}, false, nil
+	}
+	return [2]int{start, end}, true, nil
 }
 
-func sourceDocumentRegion(source string, start, end int, actions []templateAction, declarations []templateDeclaration) ([2]int, bool) {
-	ranges := declarationOutputRanges(source, declarations)
-	changed := true
-	for changed {
-		changed = false
-		for _, declaration := range ranges {
-			if declaration[0] < start || declaration[1] > end {
-				continue
-			}
-			if onlyTemplateWhitespace(source[start:declaration[0]]) {
-				start = declaration[1]
-				changed = true
-				break
-			}
-			if onlyTemplateWhitespace(source[declaration[1]:end]) {
-				end = declaration[0]
-				changed = true
-				break
-			}
-		}
-	}
-	if start >= end || !meaningfulResourceSource(source, start, end, actions, declarations) {
-		return [2]int{}, false
-	}
-	return [2]int{start, end}, true
-}
-
-func declarationOutputRanges(source string, declarations []templateDeclaration) [][2]int {
+func declarationOutputRanges(ctx context.Context, source string, declarations []templateDeclaration) ([][2]int, error) {
 	ranges := make([][2]int, 0, len(declarations))
-	for _, declaration := range declarations {
+	for index, declaration := range declarations {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, err
+		}
 		if declaration.keyword != "define" {
 			continue
 		}
@@ -804,39 +997,73 @@ func declarationOutputRanges(source string, declarations []templateDeclaration) 
 		}
 		ranges = append(ranges, [2]int{start, end})
 	}
-	return ranges
+	return mergeTemplateRanges(ctx, ranges)
 }
 
-func meaningfulResourceSource(source string, start, end int, actions []templateAction, declarations []templateDeclaration) bool {
-	masked := []byte(source[start:end])
-	blankGlobalRange := func(from, to int) {
-		if from < start {
-			from = start
+func mergeTemplateRanges(ctx context.Context, ranges [][2]int) ([][2]int, error) {
+	merged := ranges[:0]
+	for index, current := range ranges {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, err
 		}
-		if to > end {
-			to = end
+		if len(merged) == 0 || merged[len(merged)-1][1] < current[0] {
+			merged = append(merged, current)
+			continue
 		}
-		if from < to {
-			blankTemplateRange(masked, from-start, to-start)
+		if current[1] > merged[len(merged)-1][1] {
+			merged[len(merged)-1][1] = current[1]
 		}
 	}
-	for _, declaration := range declarations {
+	return merged, contextError(ctx)
+}
+
+func meaningfulResourceOffsets(ctx context.Context, source string, actions []templateAction, declarations []templateDeclaration) ([]int, error) {
+	masked := []byte(source)
+	for index, declaration := range declarations {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, err
+		}
 		if declaration.keyword == "define" {
-			blankGlobalRange(declaration.start, declaration.close.end)
+			if err := blankTemplateRange(ctx, masked, declaration.start, declaration.close.end); err != nil {
+				return nil, err
+			}
 		}
 	}
-	for _, action := range actions {
+	for index, action := range actions {
+		if err := checkTemplateContext(ctx, index); err != nil {
+			return nil, err
+		}
 		if action.comment || action.keyword == "if" || action.keyword == "range" || action.keyword == "with" || action.keyword == "else" || action.keyword == "end" || action.keyword == "define" {
-			blankGlobalRange(action.start, action.end)
+			if err := blankTemplateRange(ctx, masked, action.start, action.end); err != nil {
+				return nil, err
+			}
 		}
 	}
-	for _, line := range strings.Split(string(masked), "\n") {
-		trimmed := strings.TrimSpace(line)
+	maskedSource := string(masked)
+	offsets := make([]int, 0)
+	for start, lineNumber := 0, 0; start < len(masked); lineNumber++ {
+		if err := checkTemplateContext(ctx, lineNumber); err != nil {
+			return nil, err
+		}
+		lineEnd := strings.IndexByte(maskedSource[start:], '\n')
+		next := len(masked)
+		if lineEnd >= 0 {
+			lineEnd += start
+			next = lineEnd + 1
+		} else {
+			lineEnd = len(masked)
+		}
+		line := maskedSource[start:lineEnd]
+		leftTrimmed := strings.TrimLeftFunc(line, func(character rune) bool {
+			return character == ' ' || character == '\t' || character == '\r'
+		})
+		trimmed := strings.TrimSpace(leftTrimmed)
 		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			return true
+			offsets = append(offsets, start+len(line)-len(leftTrimmed))
 		}
+		start = next
 	}
-	return false
+	return offsets, contextError(ctx)
 }
 
 func onlyTemplateWhitespace(value string) bool {

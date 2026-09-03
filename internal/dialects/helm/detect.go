@@ -74,7 +74,10 @@ func (frontend) Parse(ctx context.Context, artifact *model.Artifact, detection d
 	case "helm_values_schema":
 		delta = parseValuesSchema(artifact, detection)
 	case "helm_template":
-		facet, diagnostics := parseTemplate(artifact, detection)
+		facet, diagnostics, err := parseTemplateContext(ctx, artifact, detection)
+		if err != nil {
+			return model.Delta{}, err
+		}
 		delta = deltaWithFacet(artifact, facet)
 		for index := range diagnostics {
 			diagnostic := diagnostics[index]
