@@ -31,12 +31,19 @@ var vcsDirectories = map[string]struct{}{
 type Source struct {
 	appName      string
 	root         string
-	rootHandle   *os.Root
+	openRoot     rootOpener
 	selections   []string
 	afterCollect func()
 }
 
 var errNotRegular = errors.New("source artifact is not a regular file")
+
+type rootHandle interface {
+	OpenFile(string, int, os.FileMode) (*os.File, error)
+	Close() error
+}
+
+type rootOpener func(string) (rootHandle, error)
 
 // New validates and canonicalizes a filesystem workspace and its selections.
 // Relative selections and config paths are relative to root. Config is an
@@ -49,16 +56,6 @@ func New(appName, root string, inputs []string, config string) (*Source, error) 
 	if err != nil {
 		return nil, err
 	}
-	rootHandle, err := os.OpenRoot(resolvedRoot)
-	if err != nil {
-		return nil, err
-	}
-	fail := true
-	defer func() {
-		if fail {
-			_ = rootHandle.Close()
-		}
-	}()
 
 	if len(inputs) == 0 {
 		inputs = []string{"."}
@@ -79,9 +76,10 @@ func New(appName, root string, inputs []string, config string) (*Source, error) 
 		selections = append(selections, resolved)
 	}
 
-	fail = false
-	return &Source{appName: appName, root: resolvedRoot, rootHandle: rootHandle, selections: selections}, nil
+	return &Source{appName: appName, root: resolvedRoot, openRoot: openOSRoot, selections: selections}, nil
 }
+
+func openOSRoot(path string) (rootHandle, error) { return os.OpenRoot(path) }
 
 // Load walks every selected directory without following symlinked directories,
 // deduplicates the resulting canonical workspace-relative paths, and reads the
@@ -94,6 +92,11 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return ingest.Result{}, err
 	}
+	root, err := s.openRoot(s.root)
+	if err != nil {
+		return ingest.Result{}, fmt.Errorf("open workspace root: %w", err)
+	}
+	defer root.Close()
 
 	candidates := map[string]struct{}{}
 	for _, selection := range s.selections {
@@ -117,7 +120,7 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return ingest.Result{}, err
 		}
-		raw, err := s.readRegular(rel)
+		raw, err := readRegular(root, rel)
 		if err != nil {
 			code := "IAC_SOURCE_UNREADABLE"
 			if errors.Is(err, errNotRegular) {
@@ -247,11 +250,8 @@ func (s *Source) addCandidate(path string, candidates map[string]struct{}, diagn
 	candidates[rel] = struct{}{}
 }
 
-func (s *Source) readRegular(rel string) ([]byte, error) {
-	if s.rootHandle == nil {
-		return nil, fmt.Errorf("workspace root handle is unavailable")
-	}
-	file, err := s.rootHandle.OpenFile(filepath.FromSlash(rel), safeOpenFlags, 0)
+func readRegular(root rootHandle, rel string) ([]byte, error) {
+	file, err := root.OpenFile(filepath.FromSlash(rel), safeOpenFlags, 0)
 	if err != nil {
 		return nil, err
 	}

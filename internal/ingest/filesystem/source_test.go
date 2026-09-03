@@ -224,6 +224,40 @@ func TestLoadHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestLoadClosesRootForEveryInvocation(t *testing.T) {
+	s, err := New("payments", fixtureRoot(t), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened, closed int
+	s.openRoot = trackingRootOpener(&opened, &closed)
+	for range 2 {
+		if _, err := s.Load(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if opened != 2 || closed != 2 {
+		t.Fatalf("root lifecycle opened=%d closed=%d, want 2/2", opened, closed)
+	}
+}
+
+func TestLoadClosesRootAfterCancellation(t *testing.T) {
+	s, err := New("payments", fixtureRoot(t), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened, closed int
+	s.openRoot = trackingRootOpener(&opened, &closed)
+	ctx, cancel := context.WithCancel(context.Background())
+	s.afterCollect = cancel
+	if _, err := s.Load(ctx); err != context.Canceled {
+		t.Fatalf("Load error = %v, want context.Canceled", err)
+	}
+	if opened != 1 || closed != 1 {
+		t.Fatalf("root lifecycle opened=%d closed=%d, want 1/1", opened, closed)
+	}
+}
+
 func TestLoadRejectsSelectedFIFOWithoutBlocking(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mkfifo is unavailable on Windows")
@@ -390,5 +424,26 @@ func loadWithoutBlocking(t *testing.T, source *Source) ingest.Result {
 	case <-time.After(time.Second):
 		t.Fatal("Load blocked on a special file")
 		return ingest.Result{}
+	}
+}
+
+type trackingRoot struct {
+	rootHandle
+	closed *int
+}
+
+func (r *trackingRoot) Close() error {
+	*r.closed = *r.closed + 1
+	return r.rootHandle.Close()
+}
+
+func trackingRootOpener(opened, closed *int) rootOpener {
+	return func(path string) (rootHandle, error) {
+		root, err := os.OpenRoot(path)
+		if err != nil {
+			return nil, err
+		}
+		*opened = *opened + 1
+		return &trackingRoot{rootHandle: root, closed: closed}, nil
 	}
 }
