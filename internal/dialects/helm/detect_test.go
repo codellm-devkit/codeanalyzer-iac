@@ -148,6 +148,23 @@ func TestDetectMarksHooksOnlyFromMetadataAnnotations(t *testing.T) {
 			name:   "nested annotation mapping lookalike",
 			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    documentation:\n      helm.sh/hook: documentation only\n",
 		},
+		{
+			name:   "document separator clears annotation scope",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n---\n    helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "document end clears annotation scope",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n...\n    helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "spec metadata is not document root metadata",
+			source: "apiVersion: v1\nkind: Pod\nspec:\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:     "later document root hook",
+			source:   "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    note: no-hook\n--- # second document\napiVersion: v1\nkind: Pod\nmetadata:\n  annotations:\n    \"helm.sh/hook\": test-success\n",
+			wantHook: true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			artifacts := helmArtifacts(t, map[string]string{

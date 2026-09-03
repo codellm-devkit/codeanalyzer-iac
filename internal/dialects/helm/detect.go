@@ -238,14 +238,26 @@ func isExplicitOverride(artifacts map[string]*model.Artifact, artifactID string)
 }
 
 func hasHookAnnotation(source string) bool {
+	rootIndent := -1
 	metadataIndent := -1
 	annotationsIndent := -1
 	annotationValueIndent := -1
 	blockIndent := -1
 	for _, line := range strings.Split(source, "\n") {
+		if isDocumentBoundary(line) {
+			rootIndent = -1
+			metadataIndent = -1
+			annotationsIndent = -1
+			annotationValueIndent = -1
+			blockIndent = -1
+			continue
+		}
 		indent, key, value, mapping := yamlMapping(line)
 		if !mapping {
 			continue
+		}
+		if rootIndent == -1 {
+			rootIndent = indent
 		}
 		if blockIndent >= 0 {
 			if indent > blockIndent {
@@ -262,7 +274,7 @@ func hasHookAnnotation(source string) bool {
 			annotationsIndent = -1
 			annotationValueIndent = -1
 		}
-		if key == "metadata" && value == "" {
+		if key == "metadata" && value == "" && indent == rootIndent {
 			metadataIndent = indent
 			continue
 		}
@@ -282,6 +294,21 @@ func hasHookAnnotation(source string) bool {
 		if isBlockScalar(value) {
 			blockIndent = indent
 		}
+	}
+	return false
+}
+
+func isDocumentBoundary(line string) bool {
+	if strings.TrimLeft(line, " \t") != line {
+		return false
+	}
+	trimmed := strings.TrimSpace(line)
+	for _, marker := range []string{"---", "..."} {
+		if !strings.HasPrefix(trimmed, marker) {
+			continue
+		}
+		tail := strings.TrimSpace(strings.TrimPrefix(trimmed, marker))
+		return tail == "" || strings.HasPrefix(tail, "#")
 	}
 	return false
 }
