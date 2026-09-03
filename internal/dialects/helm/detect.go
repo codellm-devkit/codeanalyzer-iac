@@ -41,7 +41,7 @@ func (frontend) Name() string { return dialectName }
 // conventions to any other source artifact.
 func (frontend) Detect(artifactContext dialect.ArtifactContext) (dialect.Detection, bool, error) {
 	artifact := artifactContext.Artifact
-	if artifact == nil {
+	if artifact == nil || artifact.Source == "" {
 		return dialect.Detection{}, false, nil
 	}
 	anchors := buildChartAnchorIndex(artifactContext.Artifacts)
@@ -87,6 +87,9 @@ func buildChartAnchorIndex(artifacts map[string]*model.Artifact) []chartAnchor {
 	for _, artifactPath := range sortedArtifactPaths(artifacts) {
 		artifact := artifacts[artifactPath]
 		if artifact == nil {
+			continue
+		}
+		if artifact.Source == "" {
 			continue
 		}
 		artifactPath = cleanArtifactPath(artifact.Path)
@@ -235,16 +238,76 @@ func isExplicitOverride(artifacts map[string]*model.Artifact, artifactID string)
 }
 
 func hasHookAnnotation(source string) bool {
+	metadataIndent := -1
+	annotationsIndent := -1
+	annotationValueIndent := -1
+	blockIndent := -1
 	for _, line := range strings.Split(source, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") {
+		indent, key, value, mapping := yamlMapping(line)
+		if !mapping {
 			continue
 		}
-		if strings.HasPrefix(line, "helm.sh/hook:") || strings.HasPrefix(line, `"helm.sh/hook":`) || strings.HasPrefix(line, `'helm.sh/hook':`) {
-			return true
+		if blockIndent >= 0 {
+			if indent > blockIndent {
+				continue
+			}
+			blockIndent = -1
+		}
+		if metadataIndent >= 0 && indent <= metadataIndent {
+			metadataIndent = -1
+			annotationsIndent = -1
+			annotationValueIndent = -1
+		}
+		if annotationsIndent >= 0 && indent <= annotationsIndent {
+			annotationsIndent = -1
+			annotationValueIndent = -1
+		}
+		if key == "metadata" && value == "" {
+			metadataIndent = indent
+			continue
+		}
+		if metadataIndent >= 0 && indent > metadataIndent && key == "annotations" && value == "" {
+			annotationsIndent = indent
+			annotationValueIndent = -1
+			continue
+		}
+		if annotationsIndent >= 0 && indent > annotationsIndent {
+			if annotationValueIndent == -1 {
+				annotationValueIndent = indent
+			}
+			if indent == annotationValueIndent && key == "helm.sh/hook" {
+				return true
+			}
+		}
+		if isBlockScalar(value) {
+			blockIndent = indent
 		}
 	}
 	return false
+}
+
+func yamlMapping(line string) (indent int, key, value string, ok bool) {
+	for indent < len(line) && line[indent] == ' ' {
+		indent++
+	}
+	trimmed := strings.TrimSpace(line[indent:])
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "{{") || strings.HasPrefix(trimmed, "}}") || strings.HasPrefix(trimmed, "-") {
+		return 0, "", "", false
+	}
+	separator := strings.IndexByte(trimmed, ':')
+	if separator <= 0 {
+		return 0, "", "", false
+	}
+	key = strings.TrimSpace(trimmed[:separator])
+	if len(key) >= 2 && ((key[0] == '"' && key[len(key)-1] == '"') || (key[0] == '\'' && key[len(key)-1] == '\'')) {
+		key = key[1 : len(key)-1]
+	}
+	return indent, key, strings.TrimSpace(trimmed[separator+1:]), true
+}
+
+func isBlockScalar(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "|") || strings.HasPrefix(value, ">")
 }
 
 func rawArtifactName(base string) bool {

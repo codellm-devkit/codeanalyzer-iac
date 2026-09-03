@@ -217,6 +217,15 @@ func applicationName(app *model.Application) string {
 }
 
 func mergeDelta(destination *model.Delta, source model.Delta) error {
+	staged := cloneDelta(*destination)
+	if err := mergeDeltaInto(&staged, source); err != nil {
+		return err
+	}
+	*destination = staged
+	return nil
+}
+
+func mergeDeltaInto(destination *model.Delta, source model.Delta) error {
 	if err := mergeMap(&destination.ArtifactPatches, source.ArtifactPatches, "artifact patch"); err != nil {
 		return err
 	}
@@ -235,7 +244,8 @@ func mergeDelta(destination *model.Delta, source model.Delta) error {
 	if destination.Edges == nil && len(source.Edges) != 0 {
 		destination.Edges = map[model.Relationship]map[string]model.Edge{}
 	}
-	for relationship, edges := range source.Edges {
+	for _, relationship := range sortedRelationships(source.Edges) {
+		edges := source.Edges[relationship]
 		if destination.Edges[relationship] == nil {
 			destination.Edges[relationship] = map[string]model.Edge{}
 		}
@@ -248,14 +258,59 @@ func mergeDelta(destination *model.Delta, source model.Delta) error {
 	return nil
 }
 
-func mergeMap[K comparable, V any](destination *map[K]V, source map[K]V, kind string) error {
+func cloneDelta(source model.Delta) model.Delta {
+	result := model.Delta{
+		ArtifactPatches:             cloneMap(source.ArtifactPatches),
+		Packages:                    cloneMap(source.Packages),
+		ExternalChartReferences:     cloneMap(source.ExternalChartReferences),
+		KubernetesResourceAddresses: cloneMap(source.KubernetesResourceAddresses),
+		Diagnostics:                 cloneMap(source.Diagnostics),
+		Edges:                       map[model.Relationship]map[string]model.Edge{},
+	}
+	if source.Edges == nil {
+		result.Edges = nil
+		return result
+	}
+	for _, relationship := range sortedRelationships(source.Edges) {
+		result.Edges[relationship] = cloneMap(source.Edges[relationship])
+	}
+	return result
+}
+
+func cloneMap[V any](source map[string]V) map[string]V {
+	if source == nil {
+		return nil
+	}
+	clone := make(map[string]V, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
+}
+
+func sortedRelationships(values map[model.Relationship]map[string]model.Edge) []model.Relationship {
+	relationships := make([]model.Relationship, 0, len(values))
+	for relationship := range values {
+		relationships = append(relationships, relationship)
+	}
+	sort.Slice(relationships, func(i, j int) bool { return relationships[i] < relationships[j] })
+	return relationships
+}
+
+func mergeMap[V any](destination *map[string]V, source map[string]V, kind string) error {
 	if len(source) == 0 {
 		return nil
 	}
 	if *destination == nil {
-		*destination = make(map[K]V, len(source))
+		*destination = make(map[string]V, len(source))
 	}
-	for key, candidate := range source {
+	keys := make([]string, 0, len(source))
+	for key := range source {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		candidate := source[key]
 		if existing, ok := (*destination)[key]; ok && !reflect.DeepEqual(existing, candidate) {
 			return fmt.Errorf("%s conflict for %v", kind, key)
 		}

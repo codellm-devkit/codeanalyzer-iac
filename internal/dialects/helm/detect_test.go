@@ -112,6 +112,84 @@ func TestFrontendDetectReturnsSortedRolesWithoutRegistry(t *testing.T) {
 	}
 }
 
+func TestDetectMarksHooksOnlyFromMetadataAnnotations(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		source   string
+		wantHook bool
+	}{
+		{
+			name:     "unquoted annotation",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations:\n    helm.sh/hook: test-success\n",
+			wantHook: true,
+		},
+		{
+			name:     "quoted annotation amid template action",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations:\n    {{- if .Values.tests }}\n    \"helm.sh/hook\": test-success\n    {{- end }}\n",
+			wantHook: true,
+		},
+		{
+			name:   "scalar documentation",
+			source: "apiVersion: v1\nkind: ConfigMap\ndata:\n  documentation: |\n    helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "comment lookalike",
+			source: "apiVersion: v1\nkind: ConfigMap\n# helm.sh/hook: pre-install\n",
+		},
+		{
+			name:   "data key lookalike",
+			source: "apiVersion: v1\nkind: ConfigMap\ndata:\n  helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "annotation scalar block",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    documentation: |\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "nested annotation mapping lookalike",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    documentation:\n      helm.sh/hook: documentation only\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := helmArtifacts(t, map[string]string{
+				"Chart.yaml":          "apiVersion: v2\nname: chart\nversion: 1.0.0\n",
+				"templates/item.yaml": test.source,
+			})
+			artifact := artifacts["templates/item.yaml"]
+			got, matched, err := New().Detect(dialect.ArtifactContext{Artifact: artifact, Artifacts: artifacts})
+			if err != nil || !matched {
+				t.Fatalf("Detect() = (%#v, %t, %v)", got, matched, err)
+			}
+			hasHook := false
+			for _, role := range got.Roles {
+				hasHook = hasHook || role == "hook"
+			}
+			if hasHook != test.wantHook {
+				t.Fatalf("roles = %#v, hook = %t, want %t", got.Roles, hasHook, test.wantHook)
+			}
+		})
+	}
+}
+
+func TestDetectLeavesEmptySourceArtifactsRawAndExcludesEmptyAnchors(t *testing.T) {
+	artifacts := helmArtifacts(t, map[string]string{
+		"Chart.yaml":                                    "apiVersion: v2\nname: root\nversion: 1.0.0\n",
+		"values.yaml":                                   "",
+		"charts/empty/Chart.yaml":                       "",
+		"charts/empty/templates/ignored.yaml":           "apiVersion: v1\nkind: ConfigMap\n",
+		"charts/valid/Chart.yaml":                       "apiVersion: v2\nname: valid\nversion: 1.0.0\n",
+		"charts/valid/templates/resource.yaml":          "",
+		"charts/valid/templates/nonempty-resource.yaml": "apiVersion: v1\nkind: ConfigMap\n",
+	})
+
+	detections := detectAll(t, artifacts)
+	for _, rawPath := range []string{"values.yaml", "charts/empty/Chart.yaml", "charts/empty/templates/ignored.yaml", "charts/valid/templates/resource.yaml"} {
+		if _, ok := detections[artifacts[rawPath].ID]; ok {
+			t.Fatalf("empty-source or empty-anchor artifact %s was detected: %#v", rawPath, detections[artifacts[rawPath].ID])
+		}
+	}
+	assertDetection(t, detections, artifacts["charts/valid/templates/nonempty-resource.yaml"], "helm_template", []string{"resource"}, artifacts["charts/valid/Chart.yaml"].ID)
+}
+
 func detectAll(t *testing.T, artifacts map[string]*model.Artifact) map[string]dialect.Detection {
 	t.Helper()
 	app := model.NewApplication("app", artifacts)

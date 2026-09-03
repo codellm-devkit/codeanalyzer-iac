@@ -2,6 +2,7 @@ package dialect
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -154,9 +155,72 @@ func TestRegistryResolveAllReturnsCancellationDiagnosticWithoutMutatingApplicati
 	}
 }
 
+func TestRegistryResolveAllRejectsConflictingFrontendDeltaAtomicallyAndDeterministically(t *testing.T) {
+	artifact := testArtifact(t, "Chart.yaml")
+	app := model.NewApplication("app", map[string]*model.Artifact{artifact.Path: artifact})
+	base := resolverFrontend{name: "alpha", delta: model.Delta{Packages: map[string]*model.Package{
+		"shared": {ID: "pkg:oci/example/shared@1.0.0", Kind: "package", PURL: "pkg:oci/example/shared@1.0.0"},
+	}}}
+	conflicting := resolverFrontend{name: "zebra", delta: model.Delta{Packages: map[string]*model.Package{
+		"shared": {ID: "pkg:oci/example/shared@2.0.0", Kind: "package", PURL: "pkg:oci/example/shared@2.0.0"},
+		"leaked": {ID: "pkg:oci/example/leaked@1.0.0", Kind: "package", PURL: "pkg:oci/example/leaked@1.0.0"},
+	}}}
+	registry := NewRegistry(conflicting, base)
+
+	var serialized string
+	for range 32 {
+		delta := registry.ResolveAll(context.Background(), app)
+		if _, ok := delta.Packages["shared"]; !ok {
+			t.Fatalf("accepted package missing: %#v", delta.Packages)
+		}
+		if _, leaked := delta.Packages["leaked"]; leaked {
+			t.Fatalf("conflicting resolver leaked a partial package: %#v", delta.Packages)
+		}
+		if len(delta.Diagnostics) != 1 {
+			t.Fatalf("diagnostics = %#v, want one conflict diagnostic", delta.Diagnostics)
+		}
+		for _, diagnostic := range delta.Diagnostics {
+			if diagnostic.Code != "IAC_DIALECT_RESOLUTION_CONFLICT" {
+				t.Fatalf("diagnostic = %#v", diagnostic)
+			}
+		}
+		encoded, err := json.Marshal(delta)
+		if err != nil {
+			t.Fatalf("Marshal(delta) error = %v", err)
+		}
+		if serialized != "" && serialized != string(encoded) {
+			t.Fatalf("ResolveAll() was nondeterministic:\n%s\n%s", serialized, encoded)
+		}
+		serialized = string(encoded)
+	}
+}
+
 type roleFrontend struct {
 	name  string
 	roles []string
+}
+
+type resolverFrontend struct {
+	name  string
+	delta model.Delta
+}
+
+func (f resolverFrontend) Name() string { return f.name }
+
+func (resolverFrontend) Detect(ArtifactContext) (Detection, bool, error) {
+	return Detection{}, false, nil
+}
+
+func (resolverFrontend) Parse(context.Context, *model.Artifact, Detection) (model.Delta, error) {
+	return model.Delta{}, nil
+}
+
+func (f resolverFrontend) Resolve(context.Context, *model.Application) (model.Delta, error) {
+	return f.delta, nil
+}
+
+func (resolverFrontend) Evaluate(context.Context, *model.Application, EvaluationInput) (model.Delta, error) {
+	return model.Delta{}, nil
 }
 
 func (f roleFrontend) Name() string { return f.name }
