@@ -91,6 +91,56 @@ func TestValuesRetainConfidentKeysBeforeMalformedYAML(t *testing.T) {
 	assertDiagnosticCode(t, app, "IAC_HELM_YAML_PARSE")
 }
 
+func TestValuesRecoveryProbesReportedLineBeforeDiscardingIt(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "indentation error attributed to preceding valid line",
+			source:  "first: true\nblock:\n  child: yes\nlast: yes\n bad: no\nafter: false\n",
+			want:    []string{"first", "block", "block.child", "last"},
+			notWant: []string{"bad", "after"},
+		},
+		{
+			name:    "reported line is malformed",
+			source:  "first: true\nbroken: [one, two\nafter: false\n",
+			want:    []string{"first"},
+			notWant: []string{"broken", "after"},
+		},
+		{
+			name:    "unicode key and crlf boundary",
+			source:  "title: \"café\"\r\n\"snow☃\": yes\r\n bad: no\r\nafter: false\r\n",
+			want:    []string{"title", "snow%E2%98%83"},
+			notWant: []string{"bad", "after"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifact := testArtifact(t, "values.yaml", test.source)
+			app := parseAndValidate(t, artifact, dialect.Detection{Dialect: "helm", Kind: "helm_values", Roles: []string{"default"}})
+			values := app.Artifacts[artifact.Path].IaC.(*model.HelmValues)
+			if values.Status != "partial" {
+				t.Fatalf("values status = %q, want partial", values.Status)
+			}
+			keys := app.Artifacts[artifact.Path].ConfigKeys
+			for _, path := range test.want {
+				if keys[path] == nil {
+					t.Errorf("lost independently valid ConfigKey %q; got %v", path, sortedConfigPaths(keys))
+				}
+			}
+			for _, path := range test.notWant {
+				if keys[path] != nil {
+					t.Errorf("accepted malformed-or-suffix ConfigKey %q", path)
+				}
+			}
+			assertDiagnosticCode(t, app, "IAC_HELM_YAML_PARSE")
+		})
+	}
+}
+
 func TestValuesSchemaValidatesSchemaDocument(t *testing.T) {
 	valid := fixtureArtifact(t, "l1-v2/values.schema.json", "charts/sample/values.schema.json")
 	app := parseAndValidate(t, valid, dialect.Detection{Dialect: "helm", Kind: "helm_values_schema", Roles: []string{"validation_schema"}})

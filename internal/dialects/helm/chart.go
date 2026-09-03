@@ -408,8 +408,8 @@ func parseYAML(ctx context.Context, source string) yamlParse {
 	}
 	boundaries := yamlPrefixBoundaries(source)
 	upper := len(boundaries) - 2
-	if errorLine := yamlErrorLine(parseErr); errorLine > 1 && errorLine-1 < upper {
-		upper = errorLine - 1
+	if errorLine := yamlErrorLine(parseErr); errorLine > 0 && errorLine < upper {
+		upper = errorLine
 	}
 	if upper < 1 {
 		return yamlParse{parseError: parseErr, status: "failed", attempts: attempts}
