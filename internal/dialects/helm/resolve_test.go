@@ -326,6 +326,49 @@ func TestResolveSuppressesTemplateWinnerThatDependsOnAmbiguousDependencySelectio
 	}
 }
 
+func TestResolveKeepsInvariantParentWinnerAcrossAmbiguousDependencyCandidates(t *testing.T) {
+	tests := []struct {
+		name               string
+		candidateOneSource string
+		candidateTwoSource string
+	}{
+		{name: "both candidates define", candidateOneSource: "{{ define \"shared\" }}compatible-a{{ end }}\n", candidateTwoSource: "{{ define \"shared\" }}compatible-b{{ end }}\n"},
+		{name: "first candidate defines", candidateOneSource: "{{ define \"shared\" }}compatible-a{{ end }}\n", candidateTwoSource: "# shared is absent\n"},
+		{name: "second candidate defines", candidateOneSource: "# shared is absent\n", candidateTwoSource: "{{ define \"shared\" }}compatible-b{{ end }}\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := map[string]*model.Artifact{
+				"root/Chart.yaml":                                 testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 1.x\n    repository: file://charts/background\n"),
+				"root/templates/_helpers.tpl":                     testArtifact(t, "root/templates/_helpers.tpl", "{{ define \"shared\" }}parent{{ end }}\n"),
+				"root/templates/use.yaml":                         testArtifact(t, "root/templates/use.yaml", "{{ include \"shared\" . }}\n"),
+				"root/charts/compatible-a/Chart.yaml":             testArtifact(t, "root/charts/compatible-a/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.0.0\n"),
+				"root/charts/compatible-a/templates/_helpers.tpl": testArtifact(t, "root/charts/compatible-a/templates/_helpers.tpl", test.candidateOneSource),
+				"root/charts/compatible-b/Chart.yaml":             testArtifact(t, "root/charts/compatible-b/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.1.0\n"),
+				"root/charts/compatible-b/templates/_helpers.tpl": testArtifact(t, "root/charts/compatible-b/templates/_helpers.tpl", test.candidateTwoSource),
+				"root/charts/incompatible/Chart.yaml":             testArtifact(t, "root/charts/incompatible/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 9.0.0\n"),
+				"root/charts/incompatible/templates/_helpers.tpl": testArtifact(t, "root/charts/incompatible/templates/_helpers.tpl", "{{ define \"shared\" }}incompatible{{ end }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			delta, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := model.Apply(app, delta); err != nil {
+				t.Fatal(err)
+			}
+
+			parentDefinition := onlyNamedTemplate(t, artifacts["root/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "shared")
+			call := onlyTemplateCall(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			if call.TargetID != parentDefinition.ID {
+				t.Fatalf("invariant parent target = %q, want %q", call.TargetID, parentDefinition.ID)
+			}
+			assertEdge(t, app, model.IaCCallsTemplate, call.ID, parentDefinition.ID)
+			assertResolvedApplication(t, app)
+		})
+	}
+}
+
 func TestResolveVendoredAmbiguityConsidersOnlyCompatibleCharts(t *testing.T) {
 	build := func(secondVersion string) (map[string]*model.Artifact, *model.Application) {
 		artifacts := map[string]*model.Artifact{
@@ -548,6 +591,118 @@ func TestResolveTreatsLogicalTemplateFileCollisionAsPerNameAmbiguity(t *testing.
 				if diagnostic != nil && diagnostic.Code == helmDuplicateTemplateDefinitionCode && strings.Contains(diagnostic.Message, "rejects the render tree") {
 					t.Fatalf("distinct physical files produced false same-file parse failure: %#v", diagnostic)
 				}
+			}
+			assertResolvedApplication(t, app)
+		})
+	}
+}
+
+func TestResolveKeepsInvariantParentWinnerAcrossLogicalFileCollision(t *testing.T) {
+	tests := []struct {
+		name       string
+		firstBody  string
+		secondBody string
+	}{
+		{name: "two non-empty physical files", firstBody: "first", secondBody: "second"},
+		{name: "empty then non-empty physical files", firstBody: " {{/* empty */}} ", secondBody: "second"},
+		{name: "non-empty then empty physical files", firstBody: "first", secondBody: " {{/* empty */}} "},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := map[string]*model.Artifact{
+				"root/Chart.yaml":                             testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\n"),
+				"root/templates/_helpers.tpl":                 testArtifact(t, "root/templates/_helpers.tpl", "{{ define \"shared\" }}parent{{ end }}\n"),
+				"root/templates/use.yaml":                     testArtifact(t, "root/templates/use.yaml", "{{ include \"shared\" . }}\n"),
+				"root/charts/folder-a/Chart.yaml":             testArtifact(t, "root/charts/folder-a/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.0.0\n"),
+				"root/charts/folder-a/templates/_helpers.tpl": testArtifact(t, "root/charts/folder-a/templates/_helpers.tpl", "{{ define \"shared\" }}"+test.firstBody+"{{ end }}\n"),
+				"root/charts/folder-b/Chart.yaml":             testArtifact(t, "root/charts/folder-b/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 2.0.0\n"),
+				"root/charts/folder-b/templates/_helpers.tpl": testArtifact(t, "root/charts/folder-b/templates/_helpers.tpl", "{{ define \"shared\" }}"+test.secondBody+"{{ end }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			delta, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := model.Apply(app, delta); err != nil {
+				t.Fatal(err)
+			}
+
+			parentDefinition := onlyNamedTemplate(t, artifacts["root/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "shared")
+			call := onlyTemplateCall(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			if call.TargetID != parentDefinition.ID {
+				t.Fatalf("invariant parent target = %q, want %q", call.TargetID, parentDefinition.ID)
+			}
+			assertEdge(t, app, model.IaCCallsTemplate, call.ID, parentDefinition.ID)
+			assertResolvedApplication(t, app)
+		})
+	}
+}
+
+func TestResolveSuppressesRootTreeWhenAmbiguousCandidateMayRejectParsing(t *testing.T) {
+	tests := []struct {
+		name       string
+		badFolder  string
+		goodFolder string
+	}{
+		{name: "bad candidate first", badFolder: "candidate-a", goodFolder: "candidate-z"},
+		{name: "good candidate first", badFolder: "candidate-z", goodFolder: "candidate-a"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			badChartPath := "root/charts/" + test.badFolder + "/Chart.yaml"
+			badTemplatePath := "root/charts/" + test.badFolder + "/templates/_helpers.tpl"
+			goodChartPath := "root/charts/" + test.goodFolder + "/Chart.yaml"
+			goodTemplatePath := "root/charts/" + test.goodFolder + "/templates/_helpers.tpl"
+			artifacts := map[string]*model.Artifact{
+				"root/Chart.yaml":              testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 1.x\n    repository: file://charts/background\n"),
+				"root/templates/_helpers.tpl":  testArtifact(t, "root/templates/_helpers.tpl", "{{ define \"parent.only\" }}parent{{ end }}\n"),
+				"root/templates/use.yaml":      testArtifact(t, "root/templates/use.yaml", "{{ include \"parent.only\" . }}\n"),
+				badChartPath:                   testArtifact(t, badChartPath, "apiVersion: v2\nname: worker\nversion: 1.0.0\n"),
+				badTemplatePath:                testArtifact(t, badTemplatePath, "{{ define \"bad\" }}first{{ end }}\n{{ define \"bad\" }}second{{ end }}\n"),
+				goodChartPath:                  testArtifact(t, goodChartPath, "apiVersion: v2\nname: worker\nversion: 1.1.0\n"),
+				goodTemplatePath:               testArtifact(t, goodTemplatePath, "{{ define \"bad\" }}good{{ end }}\n"),
+				"other/Chart.yaml":             testArtifact(t, "other/Chart.yaml", "apiVersion: v2\nname: other\nversion: 1.0.0\n"),
+				"other/templates/_helpers.tpl": testArtifact(t, "other/templates/_helpers.tpl", "{{ define \"other.only\" }}other{{ end }}\n"),
+				"other/templates/use.yaml":     testArtifact(t, "other/templates/use.yaml", "{{ include \"other.only\" . }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			if got := len(artifacts[badTemplatePath].IaC.(*model.HelmTemplate).NamedTemplates); got != 2 {
+				t.Fatalf("bad candidate L1 definitions = %d, want 2", got)
+			}
+			deltaA, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deltaB, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := mustJSON(t, deltaB), mustJSON(t, deltaA); got != want {
+				t.Fatalf("possible parse-failure resolution is not deterministic\nfirst:  %s\nsecond: %s", want, got)
+			}
+			if err := model.Apply(app, deltaA); err != nil {
+				t.Fatal(err)
+			}
+
+			rootCall := onlyTemplateCall(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			if rootCall.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], rootCall.ID) {
+				t.Fatalf("possibly invalid root-tree call acquired target: %#v", rootCall)
+			}
+			otherDefinition := onlyNamedTemplate(t, artifacts["other/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "other.only")
+			otherCall := onlyTemplateCall(t, artifacts["other/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			if otherCall.TargetID != otherDefinition.ID {
+				t.Fatalf("independent root call target = %q, want %q", otherCall.TargetID, otherDefinition.ID)
+			}
+			assertEdge(t, app, model.IaCCallsTemplate, otherCall.ID, otherDefinition.ID)
+
+			foundConservativeDiagnostic := false
+			for _, diagnostic := range app.Diagnostics {
+				if diagnostic != nil && diagnostic.ArtifactID == artifacts["root/Chart.yaml"].ID && diagnostic.Code == helmDuplicateTemplateDefinitionCode {
+					foundConservativeDiagnostic = true
+				}
+			}
+			if !foundConservativeDiagnostic {
+				t.Fatal("root tree is missing deterministic possible-parse-failure diagnostic")
 			}
 			assertResolvedApplication(t, app)
 		})
@@ -955,6 +1110,19 @@ func TestResolveLargeChartIndexHonorsPromptCancellation(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
 		t.Fatalf("pre-cancelled large resolution took %s", elapsed)
+	}
+}
+
+func TestTemplateWinnerOutcomePropagationHonorsPromptCancellation(t *testing.T) {
+	alternatives := make([]map[string]templateDefinitionCandidate, 2_000)
+	for index := range alternatives {
+		definition := &model.HelmNamedTemplate{ID: fmt.Sprintf("can://template/%06d", index), Name: "shared"}
+		alternatives[index] = map[string]templateDefinitionCandidate{"shared": {definition: definition}}
+	}
+	ctx := newCancelAfterChecksContext(3)
+	err := applyTemplateFileAlternatives(ctx, map[string]map[string]templateDefinitionCandidate{}, alternatives, true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("applyTemplateFileAlternatives(cancel) error = %v, want context.Canceled", err)
 	}
 }
 

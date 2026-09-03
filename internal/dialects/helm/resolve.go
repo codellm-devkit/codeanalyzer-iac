@@ -58,10 +58,23 @@ type renderChartInstance struct {
 	fullPath string
 }
 
+type renderChartAlternative struct {
+	id        string
+	instances []renderChartInstance
+}
+
+// A group is one unresolved Helm dependency selection. Exactly one alternative
+// can be present in a concrete loaded chart, so files missing from some
+// alternatives must retain an explicit absence outcome.
+type renderChartAlternativeGroup struct {
+	id           string
+	alternatives []renderChartAlternative
+}
+
 type renderTree struct {
-	root                   *resolvedChart
-	instances              []renderChartInstance
-	uncertainTemplateNames map[string]bool
+	root              *resolvedChart
+	instances         []renderChartInstance
+	alternativeGroups []renderChartAlternativeGroup
 }
 
 type templateDefinitionCandidate struct {
@@ -70,8 +83,10 @@ type templateDefinitionCandidate struct {
 }
 
 type templateFileSource struct {
-	artifact   *model.Artifact
-	candidates map[string][]templateDefinitionCandidate
+	artifact               *model.Artifact
+	candidates             map[string][]templateDefinitionCandidate
+	uncertaintyGroup       string
+	uncertaintyAlternative string
 }
 
 type valueCandidate struct {
@@ -531,7 +546,7 @@ func renderTreeIndex(ctx context.Context, index *resolutionIndex, linksByOwner m
 		if index.nestedChartIDs[root.artifact.ID] {
 			continue
 		}
-		tree := renderTree{root: root, uncertainTemplateNames: map[string]bool{}}
+		tree := renderTree{root: root}
 		seen := map[string]bool{}
 		active := map[string]bool{}
 		var appendChart func(*resolvedChart, string, string) error
@@ -568,11 +583,25 @@ func renderTreeIndex(ctx context.Context, index *resolutionIndex, linksByOwner m
 				if link.child != nil || len(link.candidates) < 2 || disabledNames[link.effectiveName] {
 					continue
 				}
-				seenUncertainCharts := map[string]bool{}
+				group := renderChartAlternativeGroup{id: chart.artifact.ID + "\x00" + fullPath + "\x00" + link.declarationID}
 				for _, candidate := range link.candidates {
-					if err := collectUncertainTemplateNames(ctx, index, candidate, tree.uncertainTemplateNames, seenUncertainCharts); err != nil {
+					instances, err := collectPossibleRenderInstances(
+						ctx,
+						index,
+						linksByOwner,
+						root,
+						candidate,
+						path.Join(fullPath, "charts", link.effectiveName),
+						chartPrefix+link.effectiveName+".",
+						map[string]bool{},
+					)
+					if err != nil {
 						return err
 					}
+					group.alternatives = append(group.alternatives, renderChartAlternative{id: candidate.artifact.ID, instances: instances})
+				}
+				if len(group.alternatives) > 0 {
+					tree.alternativeGroups = append(tree.alternativeGroups, group)
 				}
 			}
 			for _, child := range index.directChildrenByParent[chart.artifact.ID] {
@@ -609,35 +638,72 @@ func renderTreeIndex(ctx context.Context, index *resolutionIndex, linksByOwner m
 	return trees, nil
 }
 
-func collectUncertainTemplateNames(ctx context.Context, index *resolutionIndex, chart *resolvedChart, names, seen map[string]bool) error {
-	if chart == nil || seen[chart.artifact.ID] {
-		return nil
+func collectPossibleRenderInstances(
+	ctx context.Context,
+	index *resolutionIndex,
+	linksByOwner map[string][]dependencyLink,
+	root *resolvedChart,
+	chart *resolvedChart,
+	fullPath string,
+	chartPrefix string,
+	seen map[string]bool,
+) ([]renderChartInstance, error) {
+	if chart == nil {
+		return nil, nil
 	}
-	seen[chart.artifact.ID] = true
-	for _, artifact := range index.artifactsByChartID[chart.artifact.ID] {
+	instanceKey := chart.artifact.ID + "\x00" + fullPath
+	if seen[instanceKey] {
+		return nil, nil
+	}
+	seen[instanceKey] = true
+	instances := []renderChartInstance{{chart: chart, fullPath: fullPath}}
+	links := linksByOwner[chart.artifact.ID]
+	suppressedPhysical := map[string]bool{}
+	disabledNames := map[string]bool{}
+	for _, link := range links {
 		if err := contextError(ctx); err != nil {
-			return err
+			return nil, err
 		}
-		facet, ok := artifact.IaC.(*model.HelmTemplate)
-		if !ok || facet == nil {
-			continue
+		for _, candidate := range link.candidates {
+			suppressedPhysical[candidate.artifact.ID] = true
 		}
-		relative := artifactRelativePath(chart, artifact)
-		if chart.facet.ChartType == "library" && !strings.HasPrefix(path.Base(relative), "_") {
-			continue
-		}
-		for _, definition := range facet.NamedTemplates {
-			if definition != nil && definition.Name != "" {
-				names[definition.Name] = true
-			}
+		if !dependencyEnabled(index, root, chart, chartPrefix, link.dependency) {
+			disabledNames[link.effectiveName] = true
 		}
 	}
 	for _, child := range index.directChildrenByParent[chart.artifact.ID] {
-		if err := collectUncertainTemplateNames(ctx, index, child, names, seen); err != nil {
-			return err
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
+		if suppressedPhysical[child.artifact.ID] || disabledNames[child.facet.Name] {
+			continue
+		}
+		nested, err := collectPossibleRenderInstances(ctx, index, linksByOwner, root, child, path.Join(fullPath, "charts", child.facet.Name), chartPrefix+child.facet.Name+".", seen)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, nested...)
+	}
+	for _, link := range links {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
+		if disabledNames[link.effectiveName] {
+			continue
+		}
+		children := link.candidates
+		if link.child != nil {
+			children = []*resolvedChart{link.child}
+		}
+		for _, child := range children {
+			nested, err := collectPossibleRenderInstances(ctx, index, linksByOwner, root, child, path.Join(fullPath, "charts", link.effectiveName), chartPrefix+link.effectiveName+".", seen)
+			if err != nil {
+				return nil, err
+			}
+			instances = append(instances, nested...)
 		}
 	}
-	return nil
+	return instances, nil
 }
 
 func ociDependencyPURL(dependency *model.HelmDependency) (string, bool) {
@@ -691,12 +757,11 @@ func encodePURLComponent(value string) string {
 func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *resolutionIndex, tree renderTree) error {
 	templateSourcesByFile := map[string][]templateFileSource{}
 	definitionIDs := map[string]bool{}
+	definitionIDsByName := map[string]map[string]bool{}
 	templateArtifacts := map[string]*model.Artifact{}
 	uncertainCallArtifacts := map[string]bool{}
-	if tree.uncertainTemplateNames == nil {
-		tree.uncertainTemplateNames = map[string]bool{}
-	}
-	for _, instance := range tree.instances {
+	alternativeCountByGroup := map[string]int{}
+	collectInstance := func(instance renderChartInstance, uncertaintyGroup, uncertaintyAlternative string) error {
 		if err := contextError(ctx); err != nil {
 			return err
 		}
@@ -712,9 +777,18 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 			if instance.chart.facet.ChartType == "library" && !strings.HasPrefix(path.Base(relative), "_") {
 				continue
 			}
-			templateArtifacts[artifact.ID] = artifact
+			if uncertaintyGroup == "" {
+				templateArtifacts[artifact.ID] = artifact
+			} else {
+				uncertainCallArtifacts[artifact.ID] = true
+			}
 			filename := path.Join(instance.fullPath, relative)
-			source := templateFileSource{artifact: artifact, candidates: map[string][]templateDefinitionCandidate{}}
+			source := templateFileSource{
+				artifact:               artifact,
+				candidates:             map[string][]templateDefinitionCandidate{},
+				uncertaintyGroup:       uncertaintyGroup,
+				uncertaintyAlternative: uncertaintyAlternative,
+			}
 			for _, key := range sortedKeysLocal(templateFacet.NamedTemplates) {
 				definition := templateFacet.NamedTemplates[key]
 				if definition == nil || definition.ID == "" || definition.Name == "" {
@@ -723,8 +797,28 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 				empty := index.definitionEmptinessByID[artifact.ID][templateDefinitionSpanKey(definition.Name, definition.Span.Bytes[0], definition.Span.Bytes[1])]
 				source.candidates[definition.Name] = append(source.candidates[definition.Name], templateDefinitionCandidate{definition: definition, empty: empty})
 				definitionIDs[definition.ID] = true
+				if definitionIDsByName[definition.Name] == nil {
+					definitionIDsByName[definition.Name] = map[string]bool{}
+				}
+				definitionIDsByName[definition.Name][definition.ID] = true
 			}
 			templateSourcesByFile[filename] = append(templateSourcesByFile[filename], source)
+		}
+		return nil
+	}
+	for _, instance := range tree.instances {
+		if err := collectInstance(instance, "", ""); err != nil {
+			return err
+		}
+	}
+	for _, group := range tree.alternativeGroups {
+		alternativeCountByGroup[group.id] = len(group.alternatives)
+		for _, alternative := range group.alternatives {
+			for _, instance := range alternative.instances {
+				if err := collectInstance(instance, group.id, alternative.id); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -736,11 +830,19 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 		}
 		return filenames[i] > filenames[j]
 	})
-	definitions := map[string][]templateDefinitionCandidate{}
+	winnerOutcomes := map[string]map[string]templateDefinitionCandidate{}
 	invalidRenderTree := false
 	for _, filename := range filenames {
 		sources := templateSourcesByFile[filename]
-		sort.Slice(sources, func(i, j int) bool { return sources[i].artifact.ID < sources[j].artifact.ID })
+		sort.Slice(sources, func(i, j int) bool {
+			if sources[i].uncertaintyGroup != sources[j].uncertaintyGroup {
+				return sources[i].uncertaintyGroup < sources[j].uncertaintyGroup
+			}
+			if sources[i].uncertaintyAlternative != sources[j].uncertaintyAlternative {
+				return sources[i].uncertaintyAlternative < sources[j].uncertaintyAlternative
+			}
+			return sources[i].artifact.ID < sources[j].artifact.ID
+		})
 		reducedSources := make([]map[string]templateDefinitionCandidate, 0, len(sources))
 		for _, source := range sources {
 			reduced := map[string]templateDefinitionCandidate{}
@@ -764,7 +866,11 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 					for _, candidate := range nonEmpty {
 						ids = append(ids, candidate.definition.ID)
 					}
-					addResolutionDiagnostic(delta, tree.root.artifact, helmDuplicateTemplateDefinitionCode, fmt.Sprintf("named template %q has multiple non-empty definitions in physical artifact %s at %s; Helm rejects the render tree: %s", name, source.artifact.ID, filename, strings.Join(ids, ", ")), "template", source.artifact.ID+"\x00"+name)
+					message := fmt.Sprintf("named template %q has multiple non-empty definitions in physical artifact %s at %s; Helm rejects the render tree: %s", name, source.artifact.ID, filename, strings.Join(ids, ", "))
+					if source.uncertaintyGroup != "" || len(sources) > 1 {
+						message = fmt.Sprintf("named template %q has multiple non-empty definitions in possible physical artifact %s at %s; a plausible Helm render input rejects the whole render tree: %s", name, source.artifact.ID, filename, strings.Join(ids, ", "))
+					}
+					addResolutionDiagnostic(delta, tree.root.artifact, helmDuplicateTemplateDefinitionCode, message, "template", source.artifact.ID+"\x00"+filename+"\x00"+name)
 					continue
 				}
 				effective := candidates[len(candidates)-1]
@@ -775,56 +881,62 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 			}
 			reducedSources = append(reducedSources, reduced)
 		}
-		if len(sources) > 1 {
-			sourceIDs := make([]string, 0, len(sources))
-			for sourceIndex, source := range sources {
-				sourceIDs = append(sourceIDs, source.artifact.ID)
-				uncertainCallArtifacts[source.artifact.ID] = true
-				for name := range reducedSources[sourceIndex] {
-					tree.uncertainTemplateNames[name] = true
-				}
+		mayBeAbsent := templateFileMayBeAbsent(sources, alternativeCountByGroup)
+		sourceIDsSet := map[string]bool{}
+		deterministicSourceIDs := map[string]bool{}
+		for _, source := range sources {
+			sourceIDsSet[source.artifact.ID] = true
+			if source.uncertaintyGroup == "" {
+				deterministicSourceIDs[source.artifact.ID] = true
 			}
-			addResolutionDiagnostic(delta, tree.root.artifact, helmAmbiguousTemplateTargetCode, fmt.Sprintf("logical template file %s is supplied by multiple physical artifacts; Helm overwrite order is unknown: %s", filename, strings.Join(sourceIDs, ", ")), "template", filename)
-			continue
 		}
-		for name, candidate := range reducedSources[0] {
-			definitions[name] = append(definitions[name], candidate)
+		if len(sourceIDsSet) > 1 || mayBeAbsent {
+			for _, source := range sources {
+				uncertainCallArtifacts[source.artifact.ID] = true
+			}
+		}
+		if len(deterministicSourceIDs) > 1 {
+			sourceIDs := sortedKeysLocal(deterministicSourceIDs)
+			addResolutionDiagnostic(delta, tree.root.artifact, helmAmbiguousTemplateTargetCode, fmt.Sprintf("logical template file %s is supplied by multiple physical artifacts; Helm overwrite order is unknown: %s", filename, strings.Join(sourceIDs, ", ")), "template", filename)
+		}
+		if err := applyTemplateFileAlternatives(ctx, winnerOutcomes, reducedSources, mayBeAbsent); err != nil {
+			return err
 		}
 	}
 	if invalidRenderTree {
 		return nil
 	}
 
-	for _, name := range sortedKeysLocal(tree.uncertainTemplateNames) {
-		if err := contextError(ctx); err != nil {
-			return err
-		}
-		addResolutionDiagnostic(delta, tree.root.artifact, helmAmbiguousTemplateTargetCode, fmt.Sprintf("named template %q has no invariant target across possible Helm render inputs", name), "template", name)
-	}
-
 	winners := map[string]*model.HelmNamedTemplate{}
-	for _, name := range sortedKeysLocal(definitions) {
+	for _, name := range sortedKeysLocal(winnerOutcomes) {
 		if err := contextError(ctx); err != nil {
 			return err
 		}
-		if tree.uncertainTemplateNames[name] {
+		outcomes := winnerOutcomes[name]
+		if len(outcomes) != 1 {
+			possibleTargets := make([]string, 0, len(outcomes))
+			for targetID := range outcomes {
+				if targetID == "" {
+					possibleTargets = append(possibleTargets, "<absent>")
+				} else {
+					possibleTargets = append(possibleTargets, targetID)
+				}
+			}
+			sort.Strings(possibleTargets)
+			addResolutionDiagnostic(delta, tree.root.artifact, helmAmbiguousTemplateTargetCode, fmt.Sprintf("named template %q has no invariant target across possible Helm render inputs; possible targets: %s", name, strings.Join(possibleTargets, ", ")), "template", name)
 			continue
 		}
-		candidates := definitions[name]
-		winner := templateDefinitionCandidate{}
-		for _, candidate := range candidates {
-			if winner.definition == nil || !candidate.empty {
-				winner = candidate
-			}
+		var winner templateDefinitionCandidate
+		for _, outcome := range outcomes {
+			winner = outcome
+		}
+		if winner.definition == nil {
+			continue
 		}
 		winners[name] = winner.definition
-		candidateIDs := map[string]bool{}
-		for _, candidate := range candidates {
-			candidateIDs[candidate.definition.ID] = true
-		}
-		if len(candidateIDs) > 1 {
-			ids := sortedKeysLocal(candidateIDs)
-			message := fmt.Sprintf("named template %q has multiple definitions; Helm load order selects %s from candidates %s", name, winner.definition.ID, strings.Join(ids, ", "))
+		if len(definitionIDsByName[name]) > 1 {
+			ids := sortedKeysLocal(definitionIDsByName[name])
+			message := fmt.Sprintf("named template %q has multiple definitions; every possible Helm load order selects %s from candidates %s", name, winner.definition.ID, strings.Join(ids, ", "))
 			addResolutionDiagnostic(delta, tree.root.artifact, helmDuplicateTemplateDefinitionCode, message, "template", name)
 		}
 	}
@@ -849,15 +961,12 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 			if call.CallKind != "template" && call.CallKind != "include" && call.CallKind != "block" {
 				continue
 			}
-			if uncertainCallArtifacts[artifact.ID] || tree.uncertainTemplateNames[call.NameExpression] {
+			winner := winners[call.NameExpression]
+			if uncertainCallArtifacts[artifact.ID] || winner == nil {
 				continue
 			}
 			targetID := call.TargetID
 			if targetID == "" {
-				winner := winners[call.NameExpression]
-				if winner == nil {
-					continue
-				}
 				targetID = winner.ID
 				patch := ensureArtifactResolutionPatch(delta, artifact.ID)
 				patch.TemplateCallTargets[key] = targetID
@@ -869,6 +978,103 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 		}
 	}
 	return nil
+}
+
+func templateFileMayBeAbsent(sources []templateFileSource, alternativeCountByGroup map[string]int) bool {
+	presentByGroup := map[string]map[string]bool{}
+	for _, source := range sources {
+		if source.uncertaintyGroup == "" {
+			return false
+		}
+		if presentByGroup[source.uncertaintyGroup] == nil {
+			presentByGroup[source.uncertaintyGroup] = map[string]bool{}
+		}
+		presentByGroup[source.uncertaintyGroup][source.uncertaintyAlternative] = true
+	}
+	for groupID, presentAlternatives := range presentByGroup {
+		if len(presentAlternatives) == alternativeCountByGroup[groupID] {
+			return false
+		}
+	}
+	return true
+}
+
+// applyTemplateFileAlternatives advances each name's possible Helm association
+// outcomes through one logical filename. A non-empty definition overwrites the
+// prior association, while an empty one only fills an absent association. The
+// state is a target set, not a Cartesian product of whole render trees.
+func applyTemplateFileAlternatives(ctx context.Context, outcomes map[string]map[string]templateDefinitionCandidate, alternatives []map[string]templateDefinitionCandidate, mayBeAbsent bool) error {
+	names := map[string]bool{}
+	nonEmptyByName := map[string]map[string]templateDefinitionCandidate{}
+	emptyByName := map[string]map[string]templateDefinitionCandidate{}
+	definitionCountByName := map[string]int{}
+	nonEmptyCountByName := map[string]int{}
+	iteration := 0
+	for _, alternative := range alternatives {
+		if err := checkTemplateContext(ctx, iteration); err != nil {
+			return err
+		}
+		iteration++
+		for name, candidate := range alternative {
+			if err := checkTemplateContext(ctx, iteration); err != nil {
+				return err
+			}
+			iteration++
+			names[name] = true
+			definitionCountByName[name]++
+			if candidate.empty {
+				if emptyByName[name] == nil {
+					emptyByName[name] = map[string]templateDefinitionCandidate{}
+				}
+				emptyByName[name][templateWinnerOutcomeKey(candidate)] = candidate
+				continue
+			}
+			nonEmptyCountByName[name]++
+			if nonEmptyByName[name] == nil {
+				nonEmptyByName[name] = map[string]templateDefinitionCandidate{}
+			}
+			nonEmptyByName[name][templateWinnerOutcomeKey(candidate)] = candidate
+		}
+	}
+	for nameIndex, name := range sortedKeysLocal(names) {
+		if err := checkTemplateContext(ctx, nameIndex); err != nil {
+			return err
+		}
+		current := outcomes[name]
+		if len(current) == 0 {
+			current = map[string]templateDefinitionCandidate{"": {}}
+		}
+		nonEmpty := nonEmptyByName[name]
+		empty := emptyByName[name]
+		hasNonEmptyFreeAlternative := mayBeAbsent || nonEmptyCountByName[name] < len(alternatives)
+		hasDefinitionFreeAlternative := mayBeAbsent || definitionCountByName[name] < len(alternatives)
+		if !hasNonEmptyFreeAlternative {
+			outcomes[name] = nonEmpty
+			continue
+		}
+		for targetID, candidate := range nonEmpty {
+			current[targetID] = candidate
+		}
+		absent, canBeAbsent := current[""]
+		if canBeAbsent {
+			delete(current, "")
+			for targetID, candidate := range empty {
+				current[targetID] = candidate
+			}
+			if hasDefinitionFreeAlternative {
+				current[""] = absent
+			}
+		}
+		outcomes[name] = current
+	}
+	return nil
+}
+
+func templateWinnerOutcomeKey(candidate templateDefinitionCandidate) string {
+	if candidate.definition == nil {
+		return ""
+	}
+	return candidate.definition.ID
 }
 
 func artifactRelativePath(chart *resolvedChart, artifact *model.Artifact) string {
