@@ -1,6 +1,10 @@
 package helm
 
 import (
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -105,5 +109,33 @@ func TestValuesSchemaValidatesSchemaDocument(t *testing.T) {
 	assertDiagnosticCode(t, invalidApp, "IAC_HELM_VALUES_SCHEMA_INVALID")
 	if got := mustJSON(t, invalidApp.Artifacts[invalid.Path].IaC); strings.Contains(got, "$schema") || strings.Contains(got, "properties") {
 		t.Fatalf("validation schema facet copied schema source: %s", got)
+	}
+}
+
+func TestValuesSchemaRejectsExternalReferencesWithoutReadingHostFiles(t *testing.T) {
+	directory := t.TempDir()
+	externalPath := filepath.Join(directory, "external.json")
+	if err := os.WriteFile(externalPath, []byte(`{"type":"string"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	externalURL := (&url.URL{Scheme: "file", Path: externalPath}).String()
+	rootURL := (&url.URL{Scheme: "file", Path: filepath.Join(directory, "root.json")}).String()
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{name: "absolute file", source: fmt.Sprintf(`{"$ref":%q}`, externalURL)},
+		{name: "id rebased relative file", source: fmt.Sprintf(`{"$id":%q,"$ref":"external.json"}`, rootURL)},
+		{name: "network", source: `{"$ref":"https://example.invalid/external.json"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifact := testArtifact(t, "values.schema.json", test.source)
+			app := parseAndValidate(t, artifact, dialect.Detection{Dialect: "helm", Kind: "helm_values_schema", Roles: []string{"validation_schema"}})
+			if facet := app.Artifacts[artifact.Path].IaC.(*model.HelmValuesSchema); facet.Status != "failed" {
+				t.Fatalf("external-reference facet = %#v, want failed", facet)
+			}
+			assertDiagnosticCode(t, app, "IAC_HELM_VALUES_SCHEMA_INVALID")
+		})
 	}
 }

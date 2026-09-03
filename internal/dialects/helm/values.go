@@ -1,6 +1,7 @@
 package helm
 
 import (
+	"context"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,8 +12,8 @@ import (
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
 
-func parseValues(artifact *model.Artifact, detection dialect.Detection) model.Delta {
-	parsed := parseYAML(artifact.Source)
+func parseValues(ctx context.Context, artifact *model.Artifact, detection dialect.Detection) model.Delta {
+	parsed := parseYAML(ctx, artifact.Source)
 	facet := &model.HelmValues{Dialect: dialectName, Kind: "helm_values", Status: parsed.status, Roles: normalizedRoles(detection.Roles)}
 	delta := deltaWithFacet(artifact, facet)
 	configKeys := map[string]*model.ConfigKey{}

@@ -1,7 +1,9 @@
 package helm
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -12,6 +14,7 @@ import (
 	"github.com/goccy/go-yaml"
 	"github.com/goccy/go-yaml/ast"
 	"github.com/goccy/go-yaml/parser"
+	"github.com/goccy/go-yaml/scanner"
 	"github.com/goccy/go-yaml/token"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -27,6 +30,7 @@ const (
 	helmValuesSchemaInvalidCode      = "IAC_HELM_VALUES_SCHEMA_INVALID"
 	helmDuplicateConfigKeyCode       = "IAC_HELM_DUPLICATE_VALUE_PATH"
 	helmInvalidCustomResourceDefCode = "IAC_HELM_INVALID_CRD"
+	maxYAMLParseAttempts             = 12
 )
 
 type chartDocument struct {
@@ -66,6 +70,7 @@ type yamlParse struct {
 	accepted   string
 	parseError error
 	status     string
+	attempts   int
 }
 
 type crdMetadata struct {
@@ -85,17 +90,35 @@ type ignoreParseResult struct {
 	patterns []string
 }
 
-func parseChart(artifact *model.Artifact, detection dialect.Detection) model.Delta {
-	parsed := parseYAML(artifact.Source)
+type denyExternalSchemaLoader struct{}
+
+func (denyExternalSchemaLoader) Load(location string) (any, error) {
+	return nil, fmt.Errorf("external JSON Schema reference is not allowed: %s", location)
+}
+
+func parseChart(ctx context.Context, artifact *model.Artifact, detection dialect.Detection) model.Delta {
+	parsed := parseYAML(ctx, artifact.Source)
 	var metadata chartDocument
 	decodeErr := decodeAcceptedYAML(parsed, &metadata)
+	if version, ok := topLevelSourceScalar(parsed.file, "version"); ok {
+		metadata.Version = version
+	}
 	metadata.APIVersion = strings.TrimSpace(metadata.APIVersion)
 	metadata.Name = strings.TrimSpace(metadata.Name)
-	metadata.Version = strings.TrimSpace(metadata.Version)
 	metadata.Type = strings.TrimSpace(metadata.Type)
 	if metadata.Type == "" {
 		metadata.Type = "application"
 	}
+	validMaintainers := make([]model.HelmMaintainer, 0, len(metadata.Maintainers))
+	invalidMaintainers := false
+	for _, maintainer := range metadata.Maintainers {
+		if strings.TrimSpace(maintainer.Name) == "" {
+			invalidMaintainers = true
+			continue
+		}
+		validMaintainers = append(validMaintainers, maintainer)
+	}
+	metadata.Maintainers = validMaintainers
 	if metadata.APIVersion != "v1" && metadata.APIVersion != "v2" {
 		delta := model.Delta{}
 		if parsed.parseError != nil {
@@ -104,7 +127,7 @@ func parseChart(artifact *model.Artifact, detection dialect.Detection) model.Del
 		addDiagnostic(&delta, artifact, helmUnsupportedAPIVersionCode, fmt.Sprintf("unsupported Helm chart apiVersion %q; expected v1 or v2", metadata.APIVersion), nil)
 		return delta
 	}
-	if metadata.Name == "" || metadata.Version == "" || metadata.Type != "application" && metadata.Type != "library" {
+	if metadata.Name == "" || strings.TrimSpace(metadata.Version) == "" || metadata.Type != "application" && metadata.Type != "library" {
 		delta := model.Delta{}
 		if parsed.parseError != nil {
 			addDiagnostic(&delta, artifact, helmYAMLParseCode, parsed.parseError.Error(), nil)
@@ -142,6 +165,10 @@ func parseChart(artifact *model.Artifact, detection dialect.Detection) model.Del
 		facet.Status = "partial"
 		addDiagnostic(&delta, artifact, helmYAMLParseCode, decodeErr.Error(), nil)
 	}
+	if invalidMaintainers {
+		facet.Status = "partial"
+		addDiagnostic(&delta, artifact, helmInvalidChartCode, "one or more Helm maintainers are missing a name", nil)
+	}
 	if metadata.APIVersion == "v2" {
 		dependencies, invalid := parseDependencies(artifact, parsed.file, metadata.Dependencies)
 		facet.Dependencies = dependencies
@@ -172,14 +199,13 @@ func parseChart(artifact *model.Artifact, detection dialect.Detection) model.Del
 	return delta
 }
 
-func parseRequirements(artifact *model.Artifact, detection dialect.Detection) model.Delta {
-	parsed := parseYAML(artifact.Source)
+func parseRequirements(ctx context.Context, artifact *model.Artifact, detection dialect.Detection) model.Delta {
+	parsed := parseYAML(ctx, artifact.Source)
 	var manifest dependencyManifest
 	decodeErr := decodeAcceptedYAML(parsed, &manifest)
 	dependencies, invalid := parseDependencies(artifact, parsed.file, manifest.Dependencies)
 	facet := &model.HelmRequirements{Dialect: dialectName, Kind: "helm_requirements", Status: parsed.status, Roles: normalizedRoles(detection.Roles), Dependencies: dependencies}
 	delta := deltaWithFacet(artifact, facet)
-	addDependencyEdges(&delta, artifact.ID, dependencies)
 	if parsed.parseError != nil {
 		facet.Status = statusForFacts(len(dependencies) > 0)
 		addDiagnostic(&delta, artifact, helmYAMLParseCode, parsed.parseError.Error(), nil)
@@ -195,14 +221,13 @@ func parseRequirements(artifact *model.Artifact, detection dialect.Detection) mo
 	return delta
 }
 
-func parseLock(artifact *model.Artifact, detection dialect.Detection) model.Delta {
-	parsed := parseYAML(artifact.Source)
+func parseLock(ctx context.Context, artifact *model.Artifact, detection dialect.Detection) model.Delta {
+	parsed := parseYAML(ctx, artifact.Source)
 	var manifest dependencyManifest
 	decodeErr := decodeAcceptedYAML(parsed, &manifest)
 	dependencies, invalid := parseDependencies(artifact, parsed.file, manifest.Dependencies)
 	facet := &model.HelmLock{Dialect: dialectName, Kind: "helm_lock", Status: parsed.status, Roles: normalizedRoles(detection.Roles), Dependencies: dependencies}
 	delta := deltaWithFacet(artifact, facet)
-	addDependencyEdges(&delta, artifact.ID, dependencies)
 	if parsed.parseError != nil {
 		facet.Status = statusForFacts(len(dependencies) > 0)
 		addDiagnostic(&delta, artifact, helmYAMLParseCode, parsed.parseError.Error(), nil)
@@ -223,12 +248,16 @@ func parseDependencies(artifact *model.Artifact, file *ast.File, documents []dep
 	nodes := sequenceEntriesForTopLevelKey(file, "dependencies")
 	invalid := false
 	for index, document := range documents {
+		if index < len(nodes) {
+			if version, ok := sourceScalarAt(mappingOf(nodes[index]), "version"); ok {
+				document.Version = version
+			}
+		}
 		document.Name = strings.TrimSpace(document.Name)
 		document.Alias = strings.TrimSpace(document.Alias)
-		document.Version = strings.TrimSpace(document.Version)
 		document.Repository = strings.TrimSpace(document.Repository)
 		document.Condition = strings.TrimSpace(document.Condition)
-		if document.Name == "" || document.Version == "" {
+		if document.Name == "" || strings.TrimSpace(document.Version) == "" {
 			invalid = true
 			continue
 		}
@@ -283,6 +312,7 @@ func parseValuesSchema(artifact *model.Artifact, detection dialect.Detection) mo
 	err := json.Unmarshal([]byte(artifact.Source), &document)
 	if err == nil {
 		compiler := jsonschema.NewCompiler()
+		compiler.UseLoader(denyExternalSchemaLoader{})
 		const resource = "https://codellm-devkit.invalid/helm/values.schema.json"
 		if addErr := compiler.AddResource(resource, document); addErr != nil {
 			err = addErr
@@ -300,15 +330,22 @@ func parseValuesSchema(artifact *model.Artifact, detection dialect.Detection) mo
 }
 
 func parseCRD(artifact *model.Artifact, detection dialect.Detection) crdParseResult {
-	parsed := parseYAML(artifact.Source)
-	index := extractCRDIndex(parsed.file)
+	return parseCRDContext(context.Background(), artifact, detection)
+}
+
+func parseCRDContext(ctx context.Context, artifact *model.Artifact, detection dialect.Detection) crdParseResult {
+	parsed := parseYAML(ctx, artifact.Source)
+	index, invalidDocuments := extractCRDIndex(parsed.file)
 	facet := &model.HelmCRD{Dialect: dialectName, Kind: "helm_crd", Status: parsed.status, Roles: normalizedRoles(detection.Roles)}
 	delta := deltaWithFacet(artifact, facet)
 	if parsed.parseError != nil {
 		facet.Status = statusForFacts(len(index) > 0)
 		addDiagnostic(&delta, artifact, helmYAMLParseCode, parsed.parseError.Error(), nil)
 	}
-	if parsed.parseError == nil && len(index) == 0 {
+	if invalidDocuments > 0 {
+		facet.Status = statusForFacts(len(index) > 0)
+		addDiagnostic(&delta, artifact, helmInvalidCustomResourceDefCode, "one or more CRD documents are missing a complete CustomResourceDefinition name, group, kind, or plural", nil)
+	} else if parsed.parseError == nil && len(index) == 0 {
 		facet.Status = "failed"
 		addDiagnostic(&delta, artifact, helmInvalidCustomResourceDefCode, "CRD source has no complete CustomResourceDefinition name, group, kind, and plural", nil)
 	}
@@ -328,14 +365,19 @@ func parseIgnore(artifact *model.Artifact, detection dialect.Detection) ignorePa
 	return ignoreParseResult{delta: deltaWithFacet(artifact, facet), patterns: patterns}
 }
 
-func extractCRDIndex(file *ast.File) []crdMetadata {
+func extractCRDIndex(file *ast.File) ([]crdMetadata, int) {
 	result := []crdMetadata{}
 	if file == nil {
-		return result
+		return result, 0
 	}
+	invalidDocuments := 0
 	for _, document := range file.Docs {
+		if document == nil || document.Body == nil {
+			continue
+		}
 		root := mappingOf(document.Body)
 		if root == nil || scalarAt(root, "kind") != "CustomResourceDefinition" {
+			invalidDocuments++
 			continue
 		}
 		spec := mappingOf(valueAt(root, "spec"))
@@ -344,40 +386,110 @@ func extractCRDIndex(file *ast.File) []crdMetadata {
 		metadata := crdMetadata{Name: scalarAt(objectMetadata, "name"), Group: scalarAt(spec, "group"), Kind: scalarAt(names, "kind"), Plural: scalarAt(names, "plural")}
 		if metadata.Name != "" && metadata.Group != "" && metadata.Kind != "" && metadata.Plural != "" {
 			result = append(result, metadata)
+		} else {
+			invalidDocuments++
 		}
 	}
-	return result
+	return result, invalidDocuments
 }
 
-func parseYAML(source string) yamlParse {
-	file, err := parser.ParseBytes([]byte(source), parser.ParseComments)
-	if err == nil {
+func parseYAML(ctx context.Context, source string) yamlParse {
+	if err := contextError(ctx); err != nil {
+		return yamlParse{parseError: err, status: "failed"}
+	}
+	file, parseErr := parser.ParseBytes([]byte(source), parser.ParseComments)
+	attempts := 1
+	if err := contextError(ctx); err != nil {
+		return yamlParse{parseError: err, status: "failed", attempts: attempts}
+	}
+	if parseErr == nil {
 		normalizeTokenOffsets(file, source)
-		return yamlParse{file: file, accepted: source, status: "complete"}
+		return yamlParse{file: file, accepted: source, status: "complete", attempts: attempts}
 	}
-	for end := previousLineBoundary(source, len(source)); end > 0; end = previousLineBoundary(source, end) {
-		prefix := source[:end]
+	boundaries := yamlPrefixBoundaries(source)
+	upper := len(boundaries) - 2
+	if errorLine := yamlErrorLine(parseErr); errorLine > 1 && errorLine-1 < upper {
+		upper = errorLine - 1
+	}
+	if upper < 1 {
+		return yamlParse{parseError: parseErr, status: "failed", attempts: attempts}
+	}
+	type recovery struct {
+		file  *ast.File
+		lines int
+	}
+	tryPrefix := func(lines int) (recovery, bool, error) {
+		if err := contextError(ctx); err != nil {
+			return recovery{}, false, err
+		}
+		prefix := source[:boundaries[lines]]
 		candidate, candidateErr := parser.ParseBytes([]byte(prefix), parser.ParseComments)
-		if candidateErr == nil && hasYAMLBody(candidate) {
-			normalizeTokenOffsets(candidate, source)
-			return yamlParse{file: candidate, accepted: prefix, parseError: err, status: "partial"}
+		attempts++
+		if err := contextError(ctx); err != nil {
+			return recovery{}, false, err
+		}
+		return recovery{file: candidate, lines: lines}, candidateErr == nil && hasYAMLBody(candidate), nil
+	}
+	first, ok, err := tryPrefix(upper)
+	if err != nil {
+		return yamlParse{parseError: err, status: "failed", attempts: attempts}
+	}
+	if ok {
+		accepted := source[:boundaries[first.lines]]
+		normalizeTokenOffsets(first.file, source)
+		return yamlParse{file: first.file, accepted: accepted, parseError: parseErr, status: "partial", attempts: attempts}
+	}
+	low, high := 1, upper-1
+	best := recovery{}
+	for low <= high && attempts < maxYAMLParseAttempts {
+		middle := low + (high-low)/2
+		candidate, valid, err := tryPrefix(middle)
+		if err != nil {
+			return yamlParse{parseError: err, status: "failed", attempts: attempts}
+		}
+		if valid {
+			best = candidate
+			low = middle + 1
+		} else {
+			high = middle - 1
 		}
 	}
-	return yamlParse{parseError: err, status: "failed"}
+	if best.file != nil {
+		accepted := source[:boundaries[best.lines]]
+		normalizeTokenOffsets(best.file, source)
+		return yamlParse{file: best.file, accepted: accepted, parseError: parseErr, status: "partial", attempts: attempts}
+	}
+	return yamlParse{parseError: parseErr, status: "failed", attempts: attempts}
 }
 
-func previousLineBoundary(source string, end int) int {
-	if end > len(source) {
-		end = len(source)
+func yamlPrefixBoundaries(source string) []int {
+	boundaries := []int{0}
+	for index := 0; index < len(source); index++ {
+		if source[index] == '\n' {
+			boundaries = append(boundaries, index+1)
+		}
 	}
-	if end > 0 && source[end-1] == '\n' {
-		end--
+	if boundaries[len(boundaries)-1] != len(source) {
+		boundaries = append(boundaries, len(source))
 	}
-	index := strings.LastIndexByte(source[:end], '\n')
-	if index < 0 {
-		return 0
+	return boundaries
+}
+
+func yamlErrorLine(err error) int {
+	type positionedError interface {
+		GetToken() *token.Token
 	}
-	return index + 1
+	var positioned positionedError
+	if errors.As(err, &positioned) {
+		if errorToken := positioned.GetToken(); errorToken != nil && errorToken.Position != nil {
+			return errorToken.Position.Line
+		}
+	}
+	var invalidToken *scanner.InvalidTokenError
+	if errors.As(err, &invalidToken) && invalidToken.Token != nil && invalidToken.Token.Position != nil {
+		return invalidToken.Token.Position.Line
+	}
+	return 0
 }
 
 func hasYAMLBody(file *ast.File) bool {
@@ -587,6 +699,35 @@ func valueAt(mapping *ast.MappingNode, key string) ast.Node {
 
 func scalarAt(mapping *ast.MappingNode, key string) string {
 	return scalarValue(valueAt(mapping, key))
+}
+
+func topLevelSourceScalar(file *ast.File, key string) (string, bool) {
+	if file == nil || len(file.Docs) == 0 || file.Docs[0] == nil {
+		return "", false
+	}
+	return sourceScalarAt(mappingOf(file.Docs[0].Body), key)
+}
+
+func sourceScalarAt(mapping *ast.MappingNode, key string) (string, bool) {
+	return sourceScalarValue(valueAt(mapping, key))
+}
+
+func sourceScalarValue(node ast.Node) (string, bool) {
+	switch typed := node.(type) {
+	case *ast.StringNode:
+		return typed.Value, true
+	case *ast.TagNode:
+		return sourceScalarValue(typed.Value)
+	case *ast.AnchorNode:
+		return sourceScalarValue(typed.Value)
+	case ast.ScalarNode:
+		if typed.GetToken() == nil {
+			return "", false
+		}
+		return tokenLexeme(*typed.GetToken()), true
+	default:
+		return "", false
+	}
 }
 
 func scalarValue(node ast.Node) string {

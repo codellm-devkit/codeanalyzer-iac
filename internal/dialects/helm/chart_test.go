@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/contract"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/dialect"
@@ -116,6 +117,62 @@ func TestLockParsesTypedSnapshotsWithoutInventingHelmPURL(t *testing.T) {
 	}
 }
 
+func TestChartRequirementsAndLocksPreserveVersionScalarSpelling(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		source    string
+		detection dialect.Detection
+		want      string
+		version   func(*model.Application, string) string
+	}{
+		{
+			name: "chart v1 numeric-looking", path: "v1/Chart.yaml", source: "apiVersion: v1\nname: legacy\nversion: 1.0\n",
+			detection: dialect.Detection{Dialect: "helm", Kind: "helm_chart", Roles: []string{"application"}}, want: "1.0",
+			version: func(app *model.Application, path string) string {
+				return app.Artifacts[path].IaC.(*model.HelmChart).Version
+			},
+		},
+		{
+			name: "chart v2 quoted whitespace", path: "v2/Chart.yaml", source: "apiVersion: v2\nname: current\nversion: ' 2.0 '\n",
+			detection: dialect.Detection{Dialect: "helm", Kind: "helm_chart", Roles: []string{"application"}}, want: " 2.0 ",
+			version: func(app *model.Application, path string) string {
+				return app.Artifacts[path].IaC.(*model.HelmChart).Version
+			},
+		},
+		{
+			name: "requirements numeric-looking", path: "v1/requirements.yaml", source: "dependencies:\n  - name: mysql\n    version: 1.0\n",
+			detection: dialect.Detection{Dialect: "helm", Kind: "helm_requirements", Roles: []string{"legacy_dependency_manifest"}}, want: "1.0",
+			version: func(app *model.Application, path string) string {
+				return app.Artifacts[path].IaC.(*model.HelmRequirements).Dependencies["mysql"].VersionConstraint
+			},
+		},
+		{
+			name: "chart lock numeric-looking", path: "v2/Chart.lock", source: "dependencies:\n  - name: redis\n    version: 2.0\n",
+			detection: dialect.Detection{Dialect: "helm", Kind: "helm_lock", Roles: []string{"dependency_lock"}}, want: "2.0",
+			version: func(app *model.Application, path string) string {
+				return app.Artifacts[path].IaC.(*model.HelmLock).Dependencies["redis"].VersionConstraint
+			},
+		},
+		{
+			name: "requirements lock quoted whitespace", path: "v1/requirements.lock", source: "dependencies:\n  - name: mysql\n    version: \" 3.0 \"\n",
+			detection: dialect.Detection{Dialect: "helm", Kind: "helm_lock", Roles: []string{"legacy_dependency_lock"}}, want: " 3.0 ",
+			version: func(app *model.Application, path string) string {
+				return app.Artifacts[path].IaC.(*model.HelmLock).Dependencies["mysql"].VersionConstraint
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifact := testArtifact(t, test.path, test.source)
+			app := parseAndValidate(t, artifact, test.detection)
+			if got := test.version(app, artifact.Path); got != test.want {
+				t.Fatalf("version = %q, want exact scalar %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestChartRejectsUnsupportedAPIVersion(t *testing.T) {
 	artifact := testArtifact(t, "Chart.yaml", "apiVersion: v3\nname: future\nversion: 1.0.0\n")
 	app := parseAndValidate(t, artifact, dialect.Detection{Dialect: "helm", Kind: "helm_chart", Roles: []string{"application"}, ChartArtifactID: artifact.ID})
@@ -130,6 +187,20 @@ func TestChartRejectsIncompleteMetadataWithoutEmittingInvalidFacet(t *testing.T)
 	app := parseAndValidate(t, artifact, dialect.Detection{Dialect: "helm", Kind: "helm_chart", Roles: []string{"application"}, ChartArtifactID: artifact.ID})
 	if app.Artifacts[artifact.Path].IaC != nil {
 		t.Fatalf("incomplete chart emitted nonconformant facet %#v", app.Artifacts[artifact.Path].IaC)
+	}
+	assertDiagnosticCode(t, app, "IAC_HELM_INVALID_CHART")
+}
+
+func TestChartFiltersNamelessMaintainerAndReportsPartial(t *testing.T) {
+	source := "apiVersion: v2\nname: maintainers\nversion: 1.0.0\nmaintainers:\n  - email: missing-name@example.test\n  - name: Present Name\n    email: present@example.test\n"
+	artifact := testArtifact(t, "Chart.yaml", source)
+	app := parseAndValidate(t, artifact, dialect.Detection{Dialect: "helm", Kind: "helm_chart", Roles: []string{"application"}, ChartArtifactID: artifact.ID})
+	chart := app.Artifacts[artifact.Path].IaC.(*model.HelmChart)
+	if chart.Status != "partial" {
+		t.Fatalf("chart status = %q, want partial", chart.Status)
+	}
+	if want := []model.HelmMaintainer{{Name: "Present Name", Email: "present@example.test"}}; !reflect.DeepEqual(chart.Maintainers, want) {
+		t.Fatalf("maintainers = %#v, want %#v", chart.Maintainers, want)
 	}
 	assertDiagnosticCode(t, app, "IAC_HELM_INVALID_CHART")
 }
@@ -168,6 +239,36 @@ func TestMalformedDependencyManifestWithoutRecoveredEntryIsFailed(t *testing.T) 
 		t.Fatalf("malformed requirements facet = %#v", facet)
 	}
 	assertDiagnosticCode(t, app, "IAC_HELM_YAML_PARSE")
+}
+
+func TestParseYAMLRecoveryIsBoundedForLongMalformedSuffix(t *testing.T) {
+	var source strings.Builder
+	for index := 0; index < 400; index++ {
+		fmt.Fprintf(&source, "before%04d: true\n", index)
+	}
+	source.WriteString("broken: [one, two\n")
+	for index := 0; index < 2500; index++ {
+		fmt.Fprintf(&source, "after%04d: true\n", index)
+	}
+	started := time.Now()
+	parsed := parseYAML(context.Background(), source.String())
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded recovery took %s", elapsed)
+	}
+	if parsed.status != "partial" || parsed.attempts > 12 {
+		t.Fatalf("recovery status=%q attempts=%d, want partial in at most 12 attempts", parsed.status, parsed.attempts)
+	}
+	if got := scalarAt(mappingOf(parsed.file.Docs[0].Body), "before0399"); got != "true" {
+		t.Fatalf("last confident prefix fact = %q, want true", got)
+	}
+}
+
+func TestParseYAMLRecoveryObservesCancellationBetweenAttempts(t *testing.T) {
+	ctx := newCancelAfterChecksContext(2)
+	parsed := parseYAML(ctx, "good: true\nbroken: [one, two\n")
+	if parsed.parseError != context.Canceled || parsed.attempts != 1 {
+		t.Fatalf("canceled recovery error=%v attempts=%d, want context.Canceled after initial parse", parsed.parseError, parsed.attempts)
+	}
 }
 
 func TestCRDAndIgnoreUseTransientIndexesAndClosedFacets(t *testing.T) {
@@ -217,6 +318,20 @@ func TestCRDWithoutMetadataNameIsFailed(t *testing.T) {
 	assertDiagnosticCode(t, app, "IAC_HELM_INVALID_CRD")
 }
 
+func TestCRDWithValidAndInvalidDocumentsIsPartial(t *testing.T) {
+	source := "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata: {name: widgets.example.test}\nspec:\n  group: example.test\n  names: {kind: Widget, plural: widgets}\n---\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nspec:\n  group: invalid.test\n  names: {kind: Invalid, plural: invalids}\n"
+	artifact := testArtifact(t, "crds/widgets.yaml", source)
+	result := parseCRD(artifact, dialect.Detection{Dialect: "helm", Kind: "helm_crd", Roles: []string{"custom_resource_definition"}})
+	app := applyAndValidate(t, artifact, result.delta)
+	if want := []crdMetadata{{Name: "widgets.example.test", Group: "example.test", Kind: "Widget", Plural: "widgets"}}; !reflect.DeepEqual(result.index, want) {
+		t.Fatalf("mixed CRD index = %#v, want %#v", result.index, want)
+	}
+	if facet := app.Artifacts[artifact.Path].IaC.(*model.HelmCRD); facet.Status != "partial" {
+		t.Fatalf("mixed CRD facet = %#v, want partial", facet)
+	}
+	assertDiagnosticCode(t, app, "IAC_HELM_INVALID_CRD")
+}
+
 func fixtureArtifact(t *testing.T, fixturePath, artifactPath string) *model.Artifact {
 	t.Helper()
 	source, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "helm", filepath.FromSlash(fixturePath)))
@@ -262,7 +377,118 @@ func applyAndValidate(t *testing.T, artifact *model.Artifact, delta model.Delta)
 	if err := helmAnalysisSchema(t).Validate(document); err != nil {
 		t.Fatalf("embedded schema validation error = %v\n%s", err, mustJSON(t, analysis))
 	}
+	assertAcceptedEdgeEndpoints(t, app)
 	return app
+}
+
+func assertAcceptedEdgeEndpoints(t *testing.T, app *model.Application) {
+	t.Helper()
+	var catalog struct {
+		Relationships []struct {
+			Type string   `json:"type"`
+			From []string `json:"from"`
+			To   []string `json:"to"`
+		} `json:"relationship_types"`
+	}
+	if err := json.Unmarshal(contract.Neo4jSchema, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	rules := map[model.Relationship]struct{ from, to []string }{}
+	for _, relationship := range catalog.Relationships {
+		rules[model.Relationship(strings.ToLower(relationship.Type))] = struct{ from, to []string }{relationship.From, relationship.To}
+	}
+	nodes := model.AllNodes(app)
+	for relationship, edges := range app.Edges {
+		rule, ok := rules[relationship]
+		if !ok {
+			t.Fatalf("accepted catalog has no relationship %s", relationship)
+		}
+		for key, edge := range edges {
+			if !hasAcceptedLabel(acceptedNodeLabels(nodes[edge.Src]), rule.from) {
+				t.Errorf("accepted catalog rejects %s/%s source %s labels=%v want one of %v", relationship, key, edge.Src, acceptedNodeLabels(nodes[edge.Src]), rule.from)
+			}
+			if !hasAcceptedLabel(acceptedNodeLabels(nodes[edge.Dst]), rule.to) {
+				t.Errorf("accepted catalog rejects %s/%s destination %s labels=%v want one of %v", relationship, key, edge.Dst, acceptedNodeLabels(nodes[edge.Dst]), rule.to)
+			}
+		}
+	}
+}
+
+func acceptedNodeLabels(node model.Node) []string {
+	switch typed := node.(type) {
+	case *model.Application:
+		return []string{"Application", "IaCApplication"}
+	case *model.Artifact:
+		labels := []string{"Artifact"}
+		switch typed.IaC.(type) {
+		case *model.HelmChart:
+			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmChart")
+		case *model.HelmRequirements:
+			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmRequirements")
+		case *model.HelmLock:
+			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmLock")
+		case *model.HelmValues:
+			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmValues")
+		case *model.HelmValuesSchema:
+			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmValuesSchema")
+		case *model.HelmCRD:
+			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmCRD")
+		case *model.HelmIgnore:
+			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmIgnore")
+		}
+		return labels
+	case *model.ConfigKey:
+		labels := []string{"ConfigKey"}
+		if _, ok := typed.IaC.(model.HelmValueFacet); ok {
+			labels = append(labels, "IaCValue", "HelmValue")
+		}
+		return labels
+	case *model.HelmDependency:
+		return []string{"HelmDependency"}
+	case *model.IdentityAlias:
+		return []string{"IdentityAlias", "IaCAlias"}
+	case *model.Diagnostic:
+		return []string{"IaCDiagnostic", "HelmDiagnostic"}
+	default:
+		return nil
+	}
+}
+
+func hasAcceptedLabel(actual, allowed []string) bool {
+	for _, label := range actual {
+		for _, candidate := range allowed {
+			if label == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type cancelAfterChecksContext struct {
+	cancelAt int
+	checks   int
+	done     chan struct{}
+}
+
+func newCancelAfterChecksContext(cancelAt int) *cancelAfterChecksContext {
+	return &cancelAfterChecksContext{cancelAt: cancelAt, done: make(chan struct{})}
+}
+
+func (*cancelAfterChecksContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelAfterChecksContext) Done() <-chan struct{}     { return c.done }
+func (c *cancelAfterChecksContext) Value(any) any             { return nil }
+func (c *cancelAfterChecksContext) Err() error {
+	c.checks++
+	if c.checks < c.cancelAt {
+		return nil
+	}
+	select {
+	case <-c.done:
+	default:
+		close(c.done)
+	}
+	return context.Canceled
 }
 
 func helmAnalysisSchema(t *testing.T) *jsonschema.Schema {

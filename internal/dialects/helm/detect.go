@@ -61,24 +61,29 @@ func (frontend) Parse(ctx context.Context, artifact *model.Artifact, detection d
 	if artifact == nil || artifact.Source == "" || detection.Dialect != "" && detection.Dialect != dialectName {
 		return model.Delta{}, nil
 	}
+	var delta model.Delta
 	switch detection.Kind {
 	case "helm_chart":
-		return parseChart(artifact, detection), nil
+		delta = parseChart(ctx, artifact, detection)
 	case "helm_requirements":
-		return parseRequirements(artifact, detection), nil
+		delta = parseRequirements(ctx, artifact, detection)
 	case "helm_lock":
-		return parseLock(artifact, detection), nil
+		delta = parseLock(ctx, artifact, detection)
 	case "helm_values":
-		return parseValues(artifact, detection), nil
+		delta = parseValues(ctx, artifact, detection)
 	case "helm_values_schema":
-		return parseValuesSchema(artifact, detection), nil
+		delta = parseValuesSchema(artifact, detection)
 	case "helm_crd":
-		return parseCRD(artifact, detection).delta, nil
+		delta = parseCRDContext(ctx, artifact, detection).delta
 	case "helm_ignore":
-		return parseIgnore(artifact, detection).delta, nil
+		delta = parseIgnore(artifact, detection).delta
 	default:
 		return model.Delta{}, nil
 	}
+	if err := contextError(ctx); err != nil {
+		return model.Delta{}, err
+	}
+	return delta, nil
 }
 
 func (frontend) Resolve(ctx context.Context, _ *model.Application) (model.Delta, error) {
