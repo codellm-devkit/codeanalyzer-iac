@@ -161,6 +161,37 @@ func TestDetectMarksHooksOnlyFromMetadataAnnotations(t *testing.T) {
 			source: "apiVersion: v1\nkind: Pod\nspec:\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
 		},
 		{
+			name:   "metadata labels annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  labels:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "metadata spec annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  spec:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "metadata arbitrary container annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  custom:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:     "direct annotations after sibling labels",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  labels:\n    app: test\n  annotations:\n    helm.sh/hook: test-success\n",
+			wantHook: true,
+		},
+		{
+			name:     "indented document root metadata",
+			source:   "  apiVersion: v1\n  kind: Pod\n  metadata:\n    annotations:\n      'helm.sh/hook': test-success\n",
+			wantHook: true,
+		},
+		{
+			name:   "annotations sequence descendant is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    - nested:\n        helm.sh/hook: documentation only\n",
+		},
+		{
+			name:     "direct annotations after sequence sibling",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  labels:\n    - app: test\n  annotations:\n    {{- if .Values.tests }}\n    helm.sh/hook: test-success\n    {{- end }}\n",
+			wantHook: true,
+		},
+		{
 			name:     "later document root hook",
 			source:   "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    note: no-hook\n--- # second document\napiVersion: v1\nkind: Pod\nmetadata:\n  annotations:\n    \"helm.sh/hook\": test-success\n",
 			wantHook: true,

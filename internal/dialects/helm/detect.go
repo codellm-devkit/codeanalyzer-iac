@@ -240,6 +240,7 @@ func isExplicitOverride(artifacts map[string]*model.Artifact, artifactID string)
 func hasHookAnnotation(source string) bool {
 	rootIndent := -1
 	metadataIndent := -1
+	metadataChildIndent := -1
 	annotationsIndent := -1
 	annotationValueIndent := -1
 	blockIndent := -1
@@ -247,6 +248,7 @@ func hasHookAnnotation(source string) bool {
 		if isDocumentBoundary(line) {
 			rootIndent = -1
 			metadataIndent = -1
+			metadataChildIndent = -1
 			annotationsIndent = -1
 			annotationValueIndent = -1
 			blockIndent = -1
@@ -254,6 +256,27 @@ func hasHookAnnotation(source string) bool {
 		}
 		indent, key, value, mapping := yamlMapping(line)
 		if !mapping {
+			if sequenceIndent, sequence := yamlSequence(line); sequence {
+				if blockIndent >= 0 && sequenceIndent > blockIndent {
+					continue
+				}
+				if metadataIndent >= 0 && sequenceIndent <= metadataIndent {
+					metadataIndent = -1
+					metadataChildIndent = -1
+					annotationsIndent = -1
+					annotationValueIndent = -1
+				}
+				if annotationsIndent >= 0 && sequenceIndent <= annotationsIndent {
+					annotationsIndent = -1
+					annotationValueIndent = -1
+				}
+				if metadataIndent >= 0 && sequenceIndent > metadataIndent && metadataChildIndent == -1 {
+					metadataChildIndent = sequenceIndent
+				}
+				if annotationsIndent >= 0 && sequenceIndent > annotationsIndent && annotationValueIndent == -1 {
+					annotationValueIndent = sequenceIndent
+				}
+			}
 			continue
 		}
 		if rootIndent == -1 {
@@ -267,6 +290,7 @@ func hasHookAnnotation(source string) bool {
 		}
 		if metadataIndent >= 0 && indent <= metadataIndent {
 			metadataIndent = -1
+			metadataChildIndent = -1
 			annotationsIndent = -1
 			annotationValueIndent = -1
 		}
@@ -276,9 +300,13 @@ func hasHookAnnotation(source string) bool {
 		}
 		if key == "metadata" && value == "" && indent == rootIndent {
 			metadataIndent = indent
+			metadataChildIndent = -1
 			continue
 		}
-		if metadataIndent >= 0 && indent > metadataIndent && key == "annotations" && value == "" {
+		if metadataIndent >= 0 && indent > metadataIndent && metadataChildIndent == -1 {
+			metadataChildIndent = indent
+		}
+		if metadataIndent >= 0 && indent == metadataChildIndent && key == "annotations" && value == "" {
 			annotationsIndent = indent
 			annotationValueIndent = -1
 			continue
@@ -296,6 +324,14 @@ func hasHookAnnotation(source string) bool {
 		}
 	}
 	return false
+}
+
+func yamlSequence(line string) (indent int, ok bool) {
+	for indent < len(line) && line[indent] == ' ' {
+		indent++
+	}
+	trimmed := strings.TrimSpace(line[indent:])
+	return indent, trimmed == "-" || strings.HasPrefix(trimmed, "- ")
 }
 
 func isDocumentBoundary(line string) bool {
