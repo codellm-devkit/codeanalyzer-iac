@@ -20,6 +20,42 @@ func TestApplyRejectsMissingArtifact(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsUnknownRelationshipWithoutMutation(t *testing.T) {
+	app := fixtureApplication()
+	unknown := Relationship("iac_typo")
+	delta := Delta{Edges: map[Relationship]map[string]Edge{
+		unknown: {"edge": {Src: app.ID, Dst: app.Artifacts["Chart.yaml"].ID}},
+	}}
+	if err := Apply(app, delta); !errors.Is(err, ErrUnknownRelationship) {
+		t.Fatalf("got %v", err)
+	}
+	if _, exists := app.Edges[unknown]; exists {
+		t.Fatal("Apply mutated the application before rejecting the relationship")
+	}
+}
+
+func TestValidateAndSchemaRejectUnknownRelationship(t *testing.T) {
+	analysis := NewAnalysis(3, fixtureApplication())
+	unknown := Relationship("iac_typo")
+	analysis.Application.Edges[unknown] = map[string]Edge{
+		"edge": {Src: analysis.Application.ID, Dst: analysis.Application.Artifacts["Chart.yaml"].ID},
+	}
+	if err := Validate(analysis.Application); err == nil || !strings.Contains(err.Error(), "unknown relationship family") {
+		t.Fatalf("Validate got %v", err)
+	}
+	encoded, err := json.Marshal(analysis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	if err := embeddedAnalysisSchema(t).Validate(document); err == nil {
+		t.Fatal("embedded schema accepted an unknown relationship")
+	}
+}
+
 func TestApplyRejectsSecondDialect(t *testing.T) {
 	app := fixtureApplication()
 	app.Artifacts["Chart.yaml"].IaC = &HelmChart{Kind: "helm_chart", Dialect: "helm"}
@@ -80,6 +116,28 @@ func TestValidateRejectsInvalidSpanAndDigest(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvertedLineColumnSpan(t *testing.T) {
+	app := fixtureApplication()
+	artifact := app.Artifacts["Chart.yaml"]
+	artifact.ConfigKeys["inverted"] = &ConfigKey{ID: ConfigKeyID(artifact.ID, "inverted"), Kind: "config_key", Name: "inverted", Path: "inverted", Span: Span{Start: [2]int{2, 1}, End: [2]int{1, 1}, Bytes: [2]int{0, 0}}}
+	if err := Validate(app); err == nil || !strings.Contains(err.Error(), "span bytes out of bounds") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestNewAnalysisRejectsOutOfRangeLevel(t *testing.T) {
+	for _, level := range []int{0, 4} {
+		t.Run("level", func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("NewAnalysis(%d) did not reject the invalid level", level)
+				}
+			}()
+			NewAnalysis(level, fixtureApplication())
+		})
+	}
+}
+
 func TestValidateRejectsSecretDataWithoutHash(t *testing.T) {
 	app := completeFixtureApplication()
 	resource := app.Artifacts["chart.yaml"].IaC.(*HelmChart).Renders["default"].Resources["secret"]
@@ -121,6 +179,14 @@ func TestTypedFixtureValidatesEmbeddedSchemaAndUsesSnakeCase(t *testing.T) {
 	if err := json.Unmarshal(encoded, &document); err != nil {
 		t.Fatal(err)
 	}
+	if err := embeddedAnalysisSchema(t).Validate(document); err != nil {
+		t.Fatal(err)
+	}
+	assertNoUppercaseJSONKeys(t, document)
+}
+
+func embeddedAnalysisSchema(t *testing.T) *jsonschema.Schema {
+	t.Helper()
 	compiler := jsonschema.NewCompiler()
 	compiler.UseRegexpEngine(regexp2Engine)
 	const schemaURL = "https://codellm-devkit.github.io/schema/v2/iac/analysis.schema.json"
@@ -135,10 +201,7 @@ func TestTypedFixtureValidatesEmbeddedSchemaAndUsesSnakeCase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := schema.Validate(document); err != nil {
-		t.Fatal(err)
-	}
-	assertNoUppercaseJSONKeys(t, document)
+	return schema
 }
 
 type regexp2SchemaRegexp regexp2.Regexp

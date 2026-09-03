@@ -36,6 +36,9 @@ func Validate(app *Application) error {
 		errors = append(errors, validateArtifact(path, artifact)...)
 	}
 	for relationship, edges := range app.Edges {
+		if !isAllowedRelationship(relationship) {
+			errors = append(errors, "unknown relationship family: "+string(relationship))
+		}
 		for _, key := range sortedKeys(edges) {
 			edge := edges[key]
 			if _, ok := nodes[edge.Src]; !ok {
@@ -223,7 +226,7 @@ func nodeSpan(node Node) (Span, bool) {
 }
 
 func validSpan(span Span, size int) bool {
-	return span.Start[0] >= 1 && span.Start[1] >= 1 && span.End[0] >= 1 && span.End[1] >= 1 && span.Bytes[0] >= 0 && span.Bytes[0] <= span.Bytes[1] && span.Bytes[1] <= size
+	return span.Start[0] >= 1 && span.Start[1] >= 1 && span.End[0] >= 1 && span.End[1] >= 1 && (span.Start[0] < span.End[0] || span.Start[0] == span.End[0] && span.Start[1] <= span.End[1]) && span.Bytes[0] >= 0 && span.Bytes[0] <= span.Bytes[1] && span.Bytes[1] <= size
 }
 
 func validateAliases(app *Application, nodes map[string]Node) []string {

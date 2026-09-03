@@ -1,6 +1,9 @@
 package model
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 type Relationship string
 
@@ -150,17 +153,31 @@ func NewApplication(appName string, artifacts map[string]*Artifact) *Application
 	return app
 }
 
+// NewAnalysis panics for a level outside the closed schema range. The constructor's
+// established pointer-only signature has no error return, so this rejects invalid
+// direct callers at the model boundary instead of constructing invalid output.
 func NewAnalysis(level int, app *Application) *Analysis {
+	if level < 1 || level > 3 {
+		panic(fmt.Sprintf("analysis level must be between 1 and 3: %d", level))
+	}
 	return &Analysis{SchemaVersion: "2.0.0", Language: "iac", MaxLevel: level, Analyzer: Analyzer{Name: "codeanalyzer-iac", Version: "dev"}, Application: app}
 }
 
 func newEdgeMaps() map[Relationship]map[string]Edge {
-	relationships := []Relationship{HasArtifact, DefinesConfig, IaCPartOfChart, IaCDeclaresDependency, IaCTargetsChartReference, IaCResolvesToChart, IaCIdentifiedByPackage, IaCDefinesTemplate, IaCHasTemplateCall, IaCCallsTemplate, IaCHasValueReference, IaCReferencesValue, IaCDeclaresProfile, IaCRendersChart, IaCHasValueLayer, IaCReadsFrom, IaCHasRender, IaCConfiguredBy, IaCHasDiagnostic, IaCProduces, IaCTargetsResource, IaCDerivedFrom, IaCAliasOf}
-	maps := make(map[Relationship]map[string]Edge, len(relationships))
-	for _, relationship := range relationships {
+	maps := make(map[Relationship]map[string]Edge, len(allowedRelationships))
+	for relationship := range allowedRelationships {
 		maps[relationship] = map[string]Edge{}
 	}
 	return maps
+}
+
+var allowedRelationships = map[Relationship]struct{}{
+	HasArtifact: {}, DefinesConfig: {}, IaCPartOfChart: {}, IaCDeclaresDependency: {}, IaCTargetsChartReference: {}, IaCResolvesToChart: {}, IaCIdentifiedByPackage: {}, IaCDefinesTemplate: {}, IaCHasTemplateCall: {}, IaCCallsTemplate: {}, IaCHasValueReference: {}, IaCReferencesValue: {}, IaCDeclaresProfile: {}, IaCRendersChart: {}, IaCHasValueLayer: {}, IaCReadsFrom: {}, IaCHasRender: {}, IaCConfiguredBy: {}, IaCHasDiagnostic: {}, IaCProduces: {}, IaCTargetsResource: {}, IaCDerivedFrom: {}, IaCAliasOf: {},
+}
+
+func isAllowedRelationship(relationship Relationship) bool {
+	_, ok := allowedRelationships[relationship]
+	return ok
 }
 
 func edgeID(src, dst string) string { return src + "->" + dst }

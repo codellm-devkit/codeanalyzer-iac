@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	ErrMissingArtifact = errors.New("artifact patch references a missing artifact")
-	ErrDialectConflict = errors.New("artifact already has a different dialect facet")
-	ErrFactConflict    = errors.New("delta conflicts with an existing fact")
+	ErrMissingArtifact     = errors.New("artifact patch references a missing artifact")
+	ErrDialectConflict     = errors.New("artifact already has a different dialect facet")
+	ErrFactConflict        = errors.New("delta conflicts with an existing fact")
+	ErrUnknownRelationship = errors.New("unknown relationship family")
 )
 
 type ConflictError struct {
@@ -39,6 +40,11 @@ type Delta struct {
 func Apply(app *Application, delta Delta) error {
 	if app == nil {
 		return fmt.Errorf("%w: nil application", ErrFactConflict)
+	}
+	for relationship := range delta.Edges {
+		if !isAllowedRelationship(relationship) {
+			return fmt.Errorf("%w: %s", ErrUnknownRelationship, relationship)
+		}
 	}
 	initializeApplication(app)
 	for _, artifactID := range sortedKeys(delta.ArtifactPatches) {
