@@ -755,11 +755,11 @@ func helmValuePath(node parse.Node) (string, bool) {
 	switch typed := node.(type) {
 	case *parse.FieldNode:
 		if len(typed.Ident) >= 2 && typed.Ident[0] == "Values" {
-			return strings.Join(typed.Ident[1:], "."), true
+			return appendValuePath("", typed.Ident[1:]...), true
 		}
 	case *parse.VariableNode:
 		if len(typed.Ident) >= 3 && typed.Ident[0] == "$" && typed.Ident[1] == "Values" {
-			return strings.Join(typed.Ident[2:], "."), true
+			return appendValuePath("", typed.Ident[2:]...), true
 		}
 	case *parse.ChainNode:
 		base, ok := helmValuePath(typed.Node)
@@ -815,7 +815,7 @@ func appendValuePath(path string, fields ...string) string {
 		if path != "" {
 			path += "."
 		}
-		path += field
+		path += encodeValuePathSegment(field)
 	}
 	return path
 }

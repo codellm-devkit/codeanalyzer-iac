@@ -22,10 +22,12 @@ func (e *ConflictError) Error() string { return fmt.Sprintf("%s: %s", ErrFactCon
 func (e *ConflictError) Unwrap() error { return ErrFactConflict }
 
 type ArtifactPatch struct {
-	Facet       ArtifactFacet
-	ConfigFacet *CodeAnalyzerIaCConfig
-	ConfigKeys  map[string]*ConfigKey
-	Aliases     []IdentityAlias
+	Facet                 ArtifactFacet
+	ConfigFacet           *CodeAnalyzerIaCConfig
+	ConfigKeys            map[string]*ConfigKey
+	Aliases               []IdentityAlias
+	TemplateCallTargets   map[string]string
+	ValueReferenceTargets map[string]string
 }
 
 type Delta struct {
@@ -103,6 +105,12 @@ func applyArtifactPatch(artifact *Artifact, patch ArtifactPatch) error {
 	if err := mergeFacts(artifact.ConfigKeys, patch.ConfigKeys, "config key"); err != nil {
 		return err
 	}
+	if err := applyTemplateCallTargets(artifact, patch.TemplateCallTargets); err != nil {
+		return err
+	}
+	if err := applyValueReferenceTargets(artifact, patch.ValueReferenceTargets); err != nil {
+		return err
+	}
 	for _, alias := range patch.Aliases {
 		found := false
 		for _, existing := range artifact.Aliases {
@@ -119,6 +127,52 @@ func applyArtifactPatch(artifact *Artifact, patch ArtifactPatch) error {
 		}
 	}
 	sort.Slice(artifact.Aliases, func(i, j int) bool { return artifact.Aliases[i].ID < artifact.Aliases[j].ID })
+	return nil
+}
+
+func applyTemplateCallTargets(artifact *Artifact, targets map[string]string) error {
+	template, ok := artifact.IaC.(*HelmTemplate)
+	if !ok {
+		if len(targets) == 0 {
+			return nil
+		}
+		return &ConflictError{Key: "template call target on non-template artifact " + artifact.ID}
+	}
+	for _, key := range sortedKeys(targets) {
+		call := template.TemplateCalls[key]
+		if call == nil || call.ID == "" {
+			return &ConflictError{Key: "missing template call " + key}
+		}
+		target := targets[key]
+		if call.TargetID == "" {
+			call.TargetID = target
+		} else if call.TargetID != target {
+			return &ConflictError{Key: "template call target " + call.ID}
+		}
+	}
+	return nil
+}
+
+func applyValueReferenceTargets(artifact *Artifact, targets map[string]string) error {
+	template, ok := artifact.IaC.(*HelmTemplate)
+	if !ok {
+		if len(targets) == 0 {
+			return nil
+		}
+		return &ConflictError{Key: "value reference target on non-template artifact " + artifact.ID}
+	}
+	for _, key := range sortedKeys(targets) {
+		reference := template.ValueReferences[key]
+		if reference == nil || reference.ID == "" {
+			return &ConflictError{Key: "missing value reference " + key}
+		}
+		target := targets[key]
+		if reference.TargetID == "" {
+			reference.TargetID = target
+		} else if reference.TargetID != target {
+			return &ConflictError{Key: "value reference target " + reference.ID}
+		}
+	}
 	return nil
 }
 

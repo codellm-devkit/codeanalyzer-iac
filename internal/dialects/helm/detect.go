@@ -109,11 +109,8 @@ func (frontend) Parse(ctx context.Context, artifact *model.Artifact, detection d
 	return delta, nil
 }
 
-func (frontend) Resolve(ctx context.Context, _ *model.Application) (model.Delta, error) {
-	if err := contextError(ctx); err != nil {
-		return model.Delta{}, err
-	}
-	return model.Delta{}, nil
+func (frontend) Resolve(ctx context.Context, app *model.Application) (model.Delta, error) {
+	return resolveContext(ctx, app)
 }
 
 func (frontend) Evaluate(ctx context.Context, _ *model.Application, _ dialect.EvaluationInput) (model.Delta, error) {

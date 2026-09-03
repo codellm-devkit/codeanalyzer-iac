@@ -457,6 +457,10 @@ func acceptedNodeLabels(node model.Node) []string {
 		return []string{"HelmResourceTemplate"}
 	case *model.HelmLookupReference:
 		return []string{"HelmLookupReference"}
+	case *model.HelmChartReference:
+		return []string{"HelmChartReference"}
+	case *model.Package:
+		return []string{"Package"}
 	case *model.IdentityAlias:
 		return []string{"IdentityAlias", "IaCAlias"}
 	case *model.Diagnostic:
