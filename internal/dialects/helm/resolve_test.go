@@ -267,6 +267,65 @@ func TestResolveDoesNotFolderScoreCompatibleVendoredCandidates(t *testing.T) {
 	assertResolvedApplication(t, app)
 }
 
+func TestResolveSuppressesTemplateWinnerThatDependsOnAmbiguousDependencySelection(t *testing.T) {
+	tests := []struct {
+		name          string
+		compatibleOne string
+		compatibleTwo string
+	}{
+		{name: "forward candidates both define", compatibleOne: "{{ define \"shared\" }}compatible-a{{ end }}\n", compatibleTwo: "{{ define \"shared\" }}compatible-b{{ end }}\n"},
+		{name: "reverse candidate definition", compatibleOne: "# no shared definition\n", compatibleTwo: "{{ define \"shared\" }}compatible-b{{ end }}\n"},
+		{name: "mixed candidate definition", compatibleOne: "{{ define \"shared\" }}compatible-a{{ end }}\n", compatibleTwo: "# no shared definition\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := map[string]*model.Artifact{
+				"root/Chart.yaml":                                 testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 1.x\n    repository: file://charts/background\n"),
+				"root/templates/_helpers.tpl":                     testArtifact(t, "root/templates/_helpers.tpl", "{{ define \"parent.only\" }}parent{{ end }}\n"),
+				"root/templates/use.yaml":                         testArtifact(t, "root/templates/use.yaml", "{{ include \"shared\" . }} {{ include \"parent.only\" . }}\n"),
+				"root/charts/compatible-a/Chart.yaml":             testArtifact(t, "root/charts/compatible-a/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.0.0\n"),
+				"root/charts/compatible-a/templates/_helpers.tpl": testArtifact(t, "root/charts/compatible-a/templates/_helpers.tpl", test.compatibleOne),
+				"root/charts/compatible-b/Chart.yaml":             testArtifact(t, "root/charts/compatible-b/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.1.0\n"),
+				"root/charts/compatible-b/templates/_helpers.tpl": testArtifact(t, "root/charts/compatible-b/templates/_helpers.tpl", test.compatibleTwo),
+				"root/charts/incompatible/Chart.yaml":             testArtifact(t, "root/charts/incompatible/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 9.0.0\n"),
+				"root/charts/incompatible/templates/_helpers.tpl": testArtifact(t, "root/charts/incompatible/templates/_helpers.tpl", "{{ define \"shared\" }}incompatible{{ end }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			deltaA, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deltaB, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := mustJSON(t, deltaB), mustJSON(t, deltaA); got != want {
+				t.Fatalf("ambiguous render resolution is not deterministic\nfirst:  %s\nsecond: %s", want, got)
+			}
+			if err := model.Apply(app, deltaA); err != nil {
+				t.Fatal(err)
+			}
+			dependency := artifacts["root/Chart.yaml"].IaC.(*model.HelmChart).Dependencies["background"]
+			reference := chartReferenceForDependency(t, app, dependency.ID)
+			if reference.ResolvedChartID != "" || hasOutgoingEdge(app.Edges[model.IaCResolvesToChart], reference.ID) {
+				t.Fatalf("ambiguous dependency acquired chart target: %#v", reference)
+			}
+			sharedCall := templateCallNamed(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "shared")
+			if sharedCall.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], sharedCall.ID) {
+				t.Fatalf("selection-dependent call acquired template target: %#v", sharedCall)
+			}
+			parentDefinition := onlyNamedTemplate(t, artifacts["root/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "parent.only")
+			parentCall := templateCallNamed(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "parent.only")
+			if parentCall.TargetID != parentDefinition.ID {
+				t.Fatalf("unrelated parent call target = %q, want %q", parentCall.TargetID, parentDefinition.ID)
+			}
+			assertDiagnosticCode(t, app, helmAmbiguousVendoredDependencyCode)
+			assertDiagnosticCode(t, app, "IAC_HELM_AMBIGUOUS_TEMPLATE_TARGET")
+			assertResolvedApplication(t, app)
+		})
+	}
+}
+
 func TestResolveVendoredAmbiguityConsidersOnlyCompatibleCharts(t *testing.T) {
 	build := func(secondVersion string) (map[string]*model.Artifact, *model.Application) {
 		artifacts := map[string]*model.Artifact{
@@ -444,6 +503,55 @@ func TestResolveRetainsUndeclaredNestedPhysicalChildInRootNamespace(t *testing.T
 		t.Fatalf("root call target = %q, want nested physical definition %q", call.TargetID, definition.ID)
 	}
 	assertResolvedApplication(t, app)
+}
+
+func TestResolveTreatsLogicalTemplateFileCollisionAsPerNameAmbiguity(t *testing.T) {
+	tests := []struct {
+		name       string
+		firstBody  string
+		secondBody string
+	}{
+		{name: "two non-empty physical files", firstBody: "first", secondBody: "second"},
+		{name: "empty then non-empty physical files", firstBody: " {{/* empty */}} ", secondBody: "second"},
+		{name: "non-empty then empty physical files", firstBody: "first", secondBody: " {{/* empty */}} "},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := map[string]*model.Artifact{
+				"root/Chart.yaml":                             testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\n"),
+				"root/templates/_parent.tpl":                  testArtifact(t, "root/templates/_parent.tpl", "{{ define \"parent.only\" }}parent{{ end }}\n"),
+				"root/templates/use.yaml":                     testArtifact(t, "root/templates/use.yaml", "{{ include \"parent.only\" . }} {{ include \"shared\" . }}\n"),
+				"root/charts/folder-a/Chart.yaml":             testArtifact(t, "root/charts/folder-a/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.0.0\n"),
+				"root/charts/folder-a/templates/_helpers.tpl": testArtifact(t, "root/charts/folder-a/templates/_helpers.tpl", "{{ define \"shared\" }}"+test.firstBody+"{{ end }}\n"),
+				"root/charts/folder-b/Chart.yaml":             testArtifact(t, "root/charts/folder-b/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 2.0.0\n"),
+				"root/charts/folder-b/templates/_helpers.tpl": testArtifact(t, "root/charts/folder-b/templates/_helpers.tpl", "{{ define \"shared\" }}"+test.secondBody+"{{ end }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			delta, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := model.Apply(app, delta); err != nil {
+				t.Fatal(err)
+			}
+			parentDefinition := onlyNamedTemplate(t, artifacts["root/templates/_parent.tpl"].IaC.(*model.HelmTemplate), "parent.only")
+			parentCall := templateCallNamed(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "parent.only")
+			if parentCall.TargetID != parentDefinition.ID {
+				t.Fatalf("unrelated parent call target = %q, want %q", parentCall.TargetID, parentDefinition.ID)
+			}
+			sharedCall := templateCallNamed(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "shared")
+			if sharedCall.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], sharedCall.ID) {
+				t.Fatalf("logical-file-collision call acquired target: %#v", sharedCall)
+			}
+			assertDiagnosticCode(t, app, "IAC_HELM_AMBIGUOUS_TEMPLATE_TARGET")
+			for _, diagnostic := range app.Diagnostics {
+				if diagnostic != nil && diagnostic.Code == helmDuplicateTemplateDefinitionCode && strings.Contains(diagnostic.Message, "rejects the render tree") {
+					t.Fatalf("distinct physical files produced false same-file parse failure: %#v", diagnostic)
+				}
+			}
+			assertResolvedApplication(t, app)
+		})
+	}
 }
 
 func TestResolveExcludesPhysicalChildFoldersIgnoredByHelmLoader(t *testing.T) {
@@ -963,6 +1071,17 @@ func onlyTemplateCall(t *testing.T, template *model.HelmTemplate, kind string) *
 		}
 	}
 	t.Fatalf("no %s call", kind)
+	return nil
+}
+
+func templateCallNamed(t *testing.T, template *model.HelmTemplate, name string) *model.HelmTemplateCall {
+	t.Helper()
+	for _, call := range template.TemplateCalls {
+		if call != nil && call.NameExpression == name {
+			return call
+		}
+	}
+	t.Fatalf("no template call to %q", name)
 	return nil
 }
 
