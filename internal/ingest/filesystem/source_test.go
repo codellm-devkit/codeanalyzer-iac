@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/codellm-devkit/codeanalyzer-iac/internal/ingest"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
 
@@ -221,6 +224,98 @@ func TestLoadHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsSelectedFIFOWithoutBlocking(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mkfifo is unavailable on Windows")
+	}
+	for _, test := range []struct {
+		name   string
+		inputs []string
+		config string
+	}{
+		{name: "direct input", inputs: []string{"input.fifo"}},
+		{name: "explicit config", inputs: []string{"README.md"}, config: "config.fifo"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := fixtureRoot(t)
+			name := "input.fifo"
+			if test.config != "" {
+				name = test.config
+			}
+			makeFIFO(t, filepath.Join(root, name))
+
+			s, err := New("payments", root, test.inputs, test.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := loadWithoutBlocking(t, s)
+			if got.Artifacts[name] != nil {
+				t.Fatalf("FIFO was inventoried: %#v", got.Artifacts)
+			}
+			if test.config == "" && len(got.Artifacts) != 0 {
+				t.Fatalf("unexpected artifacts: %#v", got.Artifacts)
+			}
+			if !hasDiagnosticCode(got.Diagnostics, "IAC_SOURCE_NOT_REGULAR") {
+				t.Fatalf("got diagnostics %#v", got.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsCandidateReplacedWithOutsideSymlink(t *testing.T) {
+	root := fixtureRoot(t)
+	target := filepath.Join(root, "replace.yaml")
+	writeFile(t, target, "inside: true\n")
+	outside := filepath.Join(t.TempDir(), "outside.yaml")
+	writeFile(t, outside, "outside: true\n")
+
+	s, err := New("payments", root, []string{"replace.yaml"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.afterCollect = func() {
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := loadWithoutBlocking(t, s)
+	if len(got.Artifacts) != 0 {
+		t.Fatalf("outside replacement was inventoried: %#v", got.Artifacts)
+	}
+	if !hasDiagnosticCode(got.Diagnostics, "IAC_SOURCE_UNREADABLE") {
+		t.Fatalf("got diagnostics %#v", got.Diagnostics)
+	}
+}
+
+func TestLoadRejectsCandidateReplacedWithFIFOWithoutBlocking(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mkfifo is unavailable on Windows")
+	}
+	root := fixtureRoot(t)
+	target := filepath.Join(root, "replace.yaml")
+	writeFile(t, target, "inside: true\n")
+	s, err := New("payments", root, []string{"replace.yaml"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.afterCollect = func() {
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		makeFIFO(t, target)
+	}
+	got := loadWithoutBlocking(t, s)
+	if len(got.Artifacts) != 0 {
+		t.Fatalf("replacement FIFO was inventoried: %#v", got.Artifacts)
+	}
+	if !hasDiagnosticCode(got.Diagnostics, "IAC_SOURCE_NOT_REGULAR") {
+		t.Fatalf("got diagnostics %#v", got.Diagnostics)
+	}
+}
+
 func fixtureRoot(t *testing.T) string {
 	t.Helper()
 	source := filepath.Join("..", "..", "..", "testdata", "ingest", "workspace")
@@ -265,4 +360,35 @@ func hasDiagnosticCode(diagnostics map[string]*model.Diagnostic, code string) bo
 		}
 	}
 	return false
+}
+
+func makeFIFO(t *testing.T, path string) {
+	t.Helper()
+	command := exec.Command("mkfifo", path)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo %q: %v: %s", path, err, output)
+	}
+}
+
+func loadWithoutBlocking(t *testing.T, source *Source) ingest.Result {
+	t.Helper()
+	type outcome struct {
+		result ingest.Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := source.Load(context.Background())
+		done <- outcome{result: result, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		if outcome.err != nil {
+			t.Fatal(outcome.err)
+		}
+		return outcome.result
+	case <-time.After(time.Second):
+		t.Fatal("Load blocked on a special file")
+		return ingest.Result{}
+	}
 }

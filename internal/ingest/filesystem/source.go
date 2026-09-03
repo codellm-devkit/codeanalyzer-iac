@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -27,10 +29,14 @@ var vcsDirectories = map[string]struct{}{
 // Source inventories one stable workspace root. Selections only constrain
 // which files are read; they never change an artifact's app-relative identity.
 type Source struct {
-	appName    string
-	root       string
-	selections []string
+	appName      string
+	root         string
+	rootHandle   *os.Root
+	selections   []string
+	afterCollect func()
 }
+
+var errNotRegular = errors.New("source artifact is not a regular file")
 
 // New validates and canonicalizes a filesystem workspace and its selections.
 // Relative selections and config paths are relative to root. Config is an
@@ -43,6 +49,16 @@ func New(appName, root string, inputs []string, config string) (*Source, error) 
 	if err != nil {
 		return nil, err
 	}
+	rootHandle, err := os.OpenRoot(resolvedRoot)
+	if err != nil {
+		return nil, err
+	}
+	fail := true
+	defer func() {
+		if fail {
+			_ = rootHandle.Close()
+		}
+	}()
 
 	if len(inputs) == 0 {
 		inputs = []string{"."}
@@ -63,7 +79,8 @@ func New(appName, root string, inputs []string, config string) (*Source, error) 
 		selections = append(selections, resolved)
 	}
 
-	return &Source{appName: appName, root: resolvedRoot, selections: selections}, nil
+	fail = false
+	return &Source{appName: appName, root: resolvedRoot, rootHandle: rootHandle, selections: selections}, nil
 }
 
 // Load walks every selected directory without following symlinked directories,
@@ -78,7 +95,7 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 		return ingest.Result{}, err
 	}
 
-	candidates := map[string]string{}
+	candidates := map[string]struct{}{}
 	for _, selection := range s.selections {
 		if err := ctx.Err(); err != nil {
 			return ingest.Result{}, err
@@ -86,6 +103,9 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 		if err := s.collect(ctx, selection, candidates, result.Diagnostics); err != nil {
 			return ingest.Result{}, err
 		}
+	}
+	if s.afterCollect != nil {
+		s.afterCollect()
 	}
 
 	paths := make([]string, 0, len(candidates))
@@ -97,10 +117,13 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return ingest.Result{}, err
 		}
-		path := candidates[rel]
-		raw, err := os.ReadFile(path)
+		raw, err := s.readRegular(rel)
 		if err != nil {
-			s.addDiagnostic(result.Diagnostics, "IAC_SOURCE_UNREADABLE", rel, "cannot read source artifact: "+err.Error(), "")
+			code := "IAC_SOURCE_UNREADABLE"
+			if errors.Is(err, errNotRegular) {
+				code = "IAC_SOURCE_NOT_REGULAR"
+			}
+			s.addDiagnostic(result.Diagnostics, code, rel, "cannot read source artifact: "+err.Error(), "")
 			continue
 		}
 		artifactID, err := model.ArtifactID(s.appName, rel)
@@ -131,7 +154,7 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 	return result, nil
 }
 
-func (s *Source) collect(ctx context.Context, selection string, candidates map[string]string, diagnostics map[string]*model.Diagnostic) error {
+func (s *Source) collect(ctx context.Context, selection string, candidates map[string]struct{}, diagnostics map[string]*model.Diagnostic) error {
 	info, err := os.Stat(selection)
 	if err != nil {
 		rel := s.relativeOrEmpty(selection)
@@ -139,6 +162,10 @@ func (s *Source) collect(ctx context.Context, selection string, candidates map[s
 		return nil
 	}
 	if !info.IsDir() {
+		if !info.Mode().IsRegular() {
+			s.addDiagnostic(diagnostics, "IAC_SOURCE_NOT_REGULAR", s.relativeOrEmpty(selection), "source selection is not a regular file", "")
+			return nil
+		}
 		s.addCandidate(selection, candidates, diagnostics)
 		return nil
 	}
@@ -190,7 +217,7 @@ func (s *Source) collect(ctx context.Context, selection string, candidates map[s
 	})
 }
 
-func (s *Source) addCandidate(path string, candidates map[string]string, diagnostics map[string]*model.Diagnostic) {
+func (s *Source) addCandidate(path string, candidates map[string]struct{}, diagnostics map[string]*model.Diagnostic) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		s.addDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", s.relativeOrEmpty(path), "cannot resolve source artifact: "+err.Error(), "")
@@ -198,6 +225,15 @@ func (s *Source) addCandidate(path string, candidates map[string]string, diagnos
 	}
 	if !withinRoot(s.root, resolved) {
 		s.addDiagnostic(diagnostics, "IAC_SOURCE_OUTSIDE_WORKSPACE", s.relativeOrEmpty(path), "source artifact resolves outside workspace", "")
+		return
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		s.addDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", s.relativeOrEmpty(path), "cannot inspect source artifact: "+err.Error(), "")
+		return
+	}
+	if !info.Mode().IsRegular() {
+		s.addDiagnostic(diagnostics, "IAC_SOURCE_NOT_REGULAR", s.relativeOrEmpty(path), "source artifact is not a regular file", "")
 		return
 	}
 	rel, err := relativePath(s.root, resolved)
@@ -208,7 +244,26 @@ func (s *Source) addCandidate(path string, candidates map[string]string, diagnos
 	if isVCSAdministrationPath(rel) {
 		return
 	}
-	candidates[rel] = resolved
+	candidates[rel] = struct{}{}
+}
+
+func (s *Source) readRegular(rel string) ([]byte, error) {
+	if s.rootHandle == nil {
+		return nil, fmt.Errorf("workspace root handle is unavailable")
+	}
+	file, err := s.rootHandle.OpenFile(filepath.FromSlash(rel), safeOpenFlags, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errNotRegular
+	}
+	return io.ReadAll(file)
 }
 
 func (s *Source) addDiagnostic(diagnostics map[string]*model.Diagnostic, code, rel, message, artifactID string) {
