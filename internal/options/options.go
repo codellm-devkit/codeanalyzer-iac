@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"path"
 	"strings"
+
+	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
 
 type InputMode string
@@ -139,10 +141,27 @@ func isGraphConfig(config, appName string) bool {
 		if u.Scheme != "can" || u.Host != "artifact" || u.RawQuery != "" || u.Fragment != "" {
 			return false
 		}
-		prefix := "can://artifact/" + appName + "/"
-		return strings.HasPrefix(config, prefix) && isSafeRelativePath(strings.TrimPrefix(config, prefix))
+		prefix, ok := graphArtifactPrefix(appName)
+		if !ok || !strings.HasPrefix(config, prefix) {
+			return false
+		}
+		relative, err := url.PathUnescape(strings.TrimPrefix(config, prefix))
+		if err != nil || !isSafeRelativePath(relative) {
+			return false
+		}
+		canonical, err := model.ArtifactID(appName, relative)
+		return err == nil && config == canonical
 	}
 	return isSafeRelativePath(config)
+}
+
+func graphArtifactPrefix(appName string) (string, bool) {
+	const marker = "_"
+	id, err := model.ArtifactID(appName, marker)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSuffix(id, "/"+marker) + "/", true
 }
 
 func isSafeRelativePath(value string) bool {

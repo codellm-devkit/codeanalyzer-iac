@@ -60,6 +60,19 @@ func TestValidateGraphConfigAllowsAddressableValues(t *testing.T) {
 	}
 }
 
+func TestValidateGraphConfigAcceptsEncodedApplicationArtifactID(t *testing.T) {
+	err := (Options{
+		Inputs:        []string{"neo4j://localhost:7687"},
+		AppName:       "payments prod",
+		AnalysisLevel: 3,
+		Emit:          EmitAuto,
+		Config:        "can://artifact/payments%20prod/configs/production.yaml",
+	}).Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateGraphConfigRejectsNonAddressableValues(t *testing.T) {
 	for _, config := range []string{
 		"/tmp/codeanalyzer-iac.yaml",
