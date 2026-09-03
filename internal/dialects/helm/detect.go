@@ -238,6 +238,12 @@ func isExplicitOverride(artifacts map[string]*model.Artifact, artifactID string)
 }
 
 func hasHookAnnotation(source string) bool {
+	const (
+		rootUnknown = iota
+		rootMapping
+		rootOther
+	)
+	rootKind := rootUnknown
 	rootIndent := -1
 	metadataIndent := -1
 	metadataChildIndent := -1
@@ -246,6 +252,7 @@ func hasHookAnnotation(source string) bool {
 	blockIndent := -1
 	for _, line := range strings.Split(source, "\n") {
 		if isDocumentBoundary(line) {
+			rootKind = rootUnknown
 			rootIndent = -1
 			metadataIndent = -1
 			metadataChildIndent = -1
@@ -255,8 +262,23 @@ func hasHookAnnotation(source string) bool {
 			continue
 		}
 		indent, key, value, mapping := yamlMapping(line)
+		sequenceIndent, sequence := yamlSequence(line)
+		if rootKind == rootUnknown {
+			switch {
+			case mapping:
+				rootKind = rootMapping
+				rootIndent = indent
+			case sequence:
+				rootKind = rootOther
+			case isYAMLNodeLine(line):
+				rootKind = rootOther
+			}
+		}
+		if rootKind != rootMapping {
+			continue
+		}
 		if !mapping {
-			if sequenceIndent, sequence := yamlSequence(line); sequence {
+			if sequence {
 				if blockIndent >= 0 && sequenceIndent > blockIndent {
 					continue
 				}
@@ -279,9 +301,6 @@ func hasHookAnnotation(source string) bool {
 			}
 			continue
 		}
-		if rootIndent == -1 {
-			rootIndent = indent
-		}
 		if blockIndent >= 0 {
 			if indent > blockIndent {
 				continue
@@ -298,17 +317,23 @@ func hasHookAnnotation(source string) bool {
 			annotationsIndent = -1
 			annotationValueIndent = -1
 		}
-		if key == "metadata" && value == "" && indent == rootIndent {
-			metadataIndent = indent
-			metadataChildIndent = -1
+		if key == "metadata" && indent == rootIndent {
+			if isEmptyMappingValue(value) {
+				metadataIndent = indent
+				metadataChildIndent = -1
+			}
 			continue
 		}
 		if metadataIndent >= 0 && indent > metadataIndent && metadataChildIndent == -1 {
 			metadataChildIndent = indent
 		}
-		if metadataIndent >= 0 && indent == metadataChildIndent && key == "annotations" && value == "" {
-			annotationsIndent = indent
-			annotationValueIndent = -1
+		if metadataIndent >= 0 && indent == metadataChildIndent && key == "annotations" {
+			if isEmptyMappingValue(value) {
+				annotationsIndent = indent
+				annotationValueIndent = -1
+			} else if flowMappingHasKey(value, "helm.sh/hook") {
+				return true
+			}
 			continue
 		}
 		if annotationsIndent >= 0 && indent > annotationsIndent {
@@ -324,6 +349,33 @@ func hasHookAnnotation(source string) bool {
 		}
 	}
 	return false
+}
+
+func isYAMLNodeLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return trimmed != "" &&
+		!strings.HasPrefix(trimmed, "#") &&
+		!strings.HasPrefix(trimmed, "%") &&
+		!strings.HasPrefix(trimmed, "{{") &&
+		!strings.HasPrefix(trimmed, "}}")
+}
+
+func isEmptyMappingValue(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "" || strings.HasPrefix(value, "#")
+}
+
+func flowMappingHasKey(value, key string) bool {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "{") {
+		return false
+	}
+	var mapping map[string]any
+	if err := yaml.Unmarshal([]byte(value), &mapping); err != nil {
+		return false
+	}
+	_, ok := mapping[key]
+	return ok
 }
 
 func yamlSequence(line string) (indent int, ok bool) {

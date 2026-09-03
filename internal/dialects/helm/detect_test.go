@@ -129,6 +129,26 @@ func TestDetectMarksHooksOnlyFromMetadataAnnotations(t *testing.T) {
 			wantHook: true,
 		},
 		{
+			name:     "direct mapping nodes with trailing comments",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata: # object metadata\n  annotations: # object annotations\n    helm.sh/hook: pre-install\n",
+			wantHook: true,
+		},
+		{
+			name:     "unquoted flow annotations",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations: {helm.sh/hook: pre-install}\n",
+			wantHook: true,
+		},
+		{
+			name:     "double quoted flow annotation",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations: {\"helm.sh/hook\": \"pre-install\"}\n",
+			wantHook: true,
+		},
+		{
+			name:     "single quoted flow annotation with siblings and comment",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations: {'example.com/note': 'safe', 'helm.sh/hook': 'pre-install'} # hooks\n",
+			wantHook: true,
+		},
+		{
 			name:   "scalar documentation",
 			source: "apiVersion: v1\nkind: ConfigMap\ndata:\n  documentation: |\n    helm.sh/hook: documentation only\n",
 		},
@@ -161,6 +181,18 @@ func TestDetectMarksHooksOnlyFromMetadataAnnotations(t *testing.T) {
 			source: "apiVersion: v1\nkind: Pod\nspec:\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
 		},
 		{
+			name:   "document root sequence element metadata is not root metadata",
+			source: "- apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "bare document root sequence element metadata is not root metadata",
+			source: "-\n  apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "later sequence document cannot inherit mapping root",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    note: no hook\n---\n- apiVersion: v1\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
 			name:   "metadata labels annotations is not direct",
 			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  labels:\n    annotations:\n      helm.sh/hook: documentation only\n",
 		},
@@ -185,6 +217,26 @@ func TestDetectMarksHooksOnlyFromMetadataAnnotations(t *testing.T) {
 		{
 			name:   "annotations sequence descendant is not direct",
 			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    - nested:\n        helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "nested hook in flow annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations: {documentation: {helm.sh/hook: documentation-only}}\n",
+		},
+		{
+			name:   "hook lookalike in flow annotation scalar is not a key",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations: {documentation: 'helm.sh/hook: documentation-only'}\n",
+		},
+		{
+			name:   "hook in flow sequence under annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations: [{helm.sh/hook: documentation-only}]\n",
+		},
+		{
+			name:   "nested flow annotations below labels are not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  labels:\n    annotations: {helm.sh/hook: documentation-only}\n",
+		},
+		{
+			name:   "quoted annotation scalar with comment text is not a mapping",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations: '# object annotations'\n    helm.sh/hook: documentation-only\n",
 		},
 		{
 			name:     "direct annotations after sequence sibling",
