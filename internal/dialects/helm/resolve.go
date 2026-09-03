@@ -30,6 +30,7 @@ type resolutionIndex struct {
 	chartByDirectory        map[string]*resolvedChart
 	ownerByArtifactID       map[string]*resolvedChart
 	artifactsByChartID      map[string][]*model.Artifact
+	directChildrenByParent  map[string][]*resolvedChart
 	directChildrenByName    map[string]map[string][]*resolvedChart
 	directChildrenByFolder  map[string]map[string][]*resolvedChart
 	nestedChartIDs          map[string]bool
@@ -45,6 +46,7 @@ type chartValuesDocument struct {
 
 type dependencyLink struct {
 	child         *resolvedChart
+	candidates    []*resolvedChart
 	dependency    *model.HelmDependency
 	declarationID string
 	effectiveName string
@@ -144,6 +146,7 @@ func newResolutionIndex(ctx context.Context, app *model.Application) (*resolutio
 		chartByDirectory:        map[string]*resolvedChart{},
 		ownerByArtifactID:       map[string]*resolvedChart{},
 		artifactsByChartID:      map[string][]*model.Artifact{},
+		directChildrenByParent:  map[string][]*resolvedChart{},
 		directChildrenByName:    map[string]map[string][]*resolvedChart{},
 		directChildrenByFolder:  map[string]map[string][]*resolvedChart{},
 		nestedChartIDs:          map[string]bool{},
@@ -230,14 +233,23 @@ func newResolutionIndex(ctx context.Context, app *model.Application) (*resolutio
 		if parent == nil {
 			continue
 		}
+		index.nestedChartIDs[child.artifact.ID] = true
+		folder := path.Base(child.directory)
+		if strings.IndexAny(folder, "_.") == 0 {
+			continue
+		}
 		if index.directChildrenByName[parent.artifact.ID] == nil {
 			index.directChildrenByName[parent.artifact.ID] = map[string][]*resolvedChart{}
 			index.directChildrenByFolder[parent.artifact.ID] = map[string][]*resolvedChart{}
 		}
 		index.directChildrenByName[parent.artifact.ID][child.facet.Name] = append(index.directChildrenByName[parent.artifact.ID][child.facet.Name], child)
-		folder := path.Base(child.directory)
+		index.directChildrenByParent[parent.artifact.ID] = append(index.directChildrenByParent[parent.artifact.ID], child)
 		index.directChildrenByFolder[parent.artifact.ID][folder] = append(index.directChildrenByFolder[parent.artifact.ID][folder], child)
-		index.nestedChartIDs[child.artifact.ID] = true
+	}
+	for parentID := range index.directChildrenByParent {
+		sort.Slice(index.directChildrenByParent[parentID], func(i, j int) bool {
+			return index.directChildrenByParent[parentID][i].artifact.ID < index.directChildrenByParent[parentID][j].artifact.ID
+		})
 	}
 	return index, nil
 }
@@ -303,8 +315,15 @@ func resolveDependencies(ctx context.Context, delta *model.Delta, index *resolut
 		if links[i].effectiveName != links[j].effectiveName {
 			return links[i].effectiveName < links[j].effectiveName
 		}
-		if links[i].child.artifact.ID != links[j].child.artifact.ID {
-			return links[i].child.artifact.ID < links[j].child.artifact.ID
+		leftChild, rightChild := "", ""
+		if links[i].child != nil {
+			leftChild = links[i].child.artifact.ID
+		}
+		if links[j].child != nil {
+			rightChild = links[j].child.artifact.ID
+		}
+		if leftChild != rightChild {
+			return leftChild < rightChild
 		}
 		return links[i].declarationID < links[j].declarationID
 	})
@@ -327,15 +346,20 @@ func resolveDependency(ctx context.Context, delta *model.Delta, index *resolutio
 	if err != nil {
 		return nil, err
 	}
-	var link *dependencyLink
+	effectiveName := dependency.Name
+	if dependency.Alias != "" {
+		effectiveName = dependency.Alias
+	}
+	link := &dependencyLink{
+		candidates:    candidates,
+		dependency:    dependency,
+		declarationID: dependency.ID,
+		effectiveName: effectiveName,
+	}
 	if len(candidates) == 1 {
 		reference.ResolvedChartID = candidates[0].artifact.ID
 		addEdge(delta, model.IaCResolvesToChart, reference.ID, reference.ResolvedChartID)
-		effectiveName := candidates[0].facet.Name
-		if dependency.Alias != "" {
-			effectiveName = dependency.Alias
-		}
-		link = &dependencyLink{child: candidates[0], dependency: dependency, declarationID: dependency.ID, effectiveName: effectiveName}
+		link.child = candidates[0]
 	} else if len(candidates) > 1 {
 		ids := make([]string, 0, len(candidates))
 		for _, candidate := range candidates {
@@ -364,7 +388,6 @@ func resolveDependency(ctx context.Context, delta *model.Delta, index *resolutio
 }
 
 func vendoredChartCandidates(ctx context.Context, index *resolutionIndex, owner *resolvedChart, dependency *model.HelmDependency) ([]*resolvedChart, []string, error) {
-	bestScore := 100
 	result := make([]*resolvedChart, 0)
 	incompatibleSet := map[string]bool{}
 	for _, candidate := range index.directChildrenByName[owner.artifact.ID][dependency.Name] {
@@ -374,18 +397,6 @@ func vendoredChartCandidates(ctx context.Context, index *resolutionIndex, owner 
 		if !isHelmCompatibleRange(dependency.VersionConstraint, candidate.facet.Version) {
 			incompatibleSet[candidate.artifact.ID] = true
 			continue
-		}
-		folder := path.Base(candidate.directory)
-		score, matched := vendoredMatchScore(folder, candidate.facet.Name, dependency)
-		if !matched {
-			continue
-		}
-		if score > bestScore {
-			continue
-		}
-		if score < bestScore {
-			bestScore = score
-			result = result[:0]
 		}
 		result = append(result, candidate)
 	}
@@ -450,7 +461,6 @@ func dependencyEnabled(index *resolutionIndex, root, owner *resolvedChart, owner
 		enabled = true
 	}
 	for condition := range strings.SplitSeq(strings.TrimSpace(dependency.Condition), ",") {
-		condition = strings.TrimSpace(condition)
 		if condition == "" {
 			continue
 		}
@@ -530,8 +540,37 @@ func renderTreeIndex(ctx context.Context, index *resolutionIndex, linksByOwner m
 			active[chart.artifact.ID] = true
 			defer delete(active, chart.artifact.ID)
 			tree.instances = append(tree.instances, renderChartInstance{chart: chart, fullPath: fullPath})
-			for _, link := range linksByOwner[chart.artifact.ID] {
+			links := linksByOwner[chart.artifact.ID]
+			suppressedPhysical := map[string]bool{}
+			disabledNames := map[string]bool{}
+			for _, link := range links {
+				if err := contextError(ctx); err != nil {
+					return err
+				}
+				for _, candidate := range link.candidates {
+					suppressedPhysical[candidate.artifact.ID] = true
+				}
 				if !dependencyEnabled(index, root, chart, chartPrefix, link.dependency) {
+					disabledNames[link.effectiveName] = true
+				}
+			}
+			for _, child := range index.directChildrenByParent[chart.artifact.ID] {
+				if err := contextError(ctx); err != nil {
+					return err
+				}
+				if suppressedPhysical[child.artifact.ID] || disabledNames[child.facet.Name] {
+					continue
+				}
+				childPrefix := chartPrefix + child.facet.Name + "."
+				if err := appendChart(child, path.Join(fullPath, "charts", child.facet.Name), childPrefix); err != nil {
+					return err
+				}
+			}
+			for _, link := range links {
+				if err := contextError(ctx); err != nil {
+					return err
+				}
+				if link.child == nil || disabledNames[link.effectiveName] {
 					continue
 				}
 				childPrefix := chartPrefix + link.effectiveName + "."
@@ -547,24 +586,6 @@ func renderTreeIndex(ctx context.Context, index *resolutionIndex, linksByOwner m
 		trees = append(trees, tree)
 	}
 	return trees, nil
-}
-
-func vendoredMatchScore(folder, chartName string, dependency *model.HelmDependency) (int, bool) {
-	if dependency.Alias != "" {
-		if folder == dependency.Alias {
-			return 0, true
-		}
-		if chartName == dependency.Alias {
-			return 1, true
-		}
-	}
-	if folder == dependency.Name {
-		return 2, true
-	}
-	if chartName == dependency.Name {
-		return 3, true
-	}
-	return 0, false
 }
 
 func ociDependencyPURL(dependency *model.HelmDependency) (string, bool) {

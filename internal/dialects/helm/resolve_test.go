@@ -224,13 +224,47 @@ func TestResolveVendoredDependenciesRequireHelmCompatibleIdentity(t *testing.T) 
 			if reference.ResolvedChartID != "" || hasOutgoingEdge(app.Edges[model.IaCResolvesToChart], reference.ID) {
 				t.Fatalf("incompatible child was resolved: %#v", reference)
 			}
+			definition := onlyNamedTemplate(t, artifacts["platform/charts/background/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "child.only")
 			call := onlyTemplateCall(t, artifacts["platform/charts/background/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
-			if call.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], call.ID) {
-				t.Fatalf("incompatible vendored chart was treated as a root render tree: %#v", call)
+			if call.TargetID != definition.ID {
+				t.Fatalf("unmatched physical child call target = %q, want retained child definition %q", call.TargetID, definition.ID)
 			}
+			assertEdge(t, app, model.IaCCallsTemplate, call.ID, definition.ID)
 			assertDiagnosticCode(t, app, "IAC_HELM_INCOMPATIBLE_VENDORED_DEPENDENCY")
 		})
 	}
+}
+
+func TestResolveDoesNotFolderScoreCompatibleVendoredCandidates(t *testing.T) {
+	artifacts := map[string]*model.Artifact{
+		"root/Chart.yaml":                                  testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 1.x\n    repository: file://charts/background\n"),
+		"root/charts/background/Chart.yaml":                testArtifact(t, "root/charts/background/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.0.0\n"),
+		"root/charts/physical-copy/Chart.yaml":             testArtifact(t, "root/charts/physical-copy/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.1.0\n"),
+		"root/charts/background/templates/_helpers.tpl":    testArtifact(t, "root/charts/background/templates/_helpers.tpl", "{{ define \"first.only\" }}first{{ end }}\n"),
+		"root/charts/physical-copy/templates/_helpers.tpl": testArtifact(t, "root/charts/physical-copy/templates/_helpers.tpl", "{{ define \"second.only\" }}second{{ end }}\n"),
+	}
+	app := parseL1Application(t, artifacts, nil)
+	deltaA, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltaB, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := mustJSON(t, deltaB), mustJSON(t, deltaA); got != want {
+		t.Fatalf("ambiguous dependency resolution is not deterministic\nfirst:  %s\nsecond: %s", want, got)
+	}
+	if err := model.Apply(app, deltaA); err != nil {
+		t.Fatal(err)
+	}
+	dependency := artifacts["root/Chart.yaml"].IaC.(*model.HelmChart).Dependencies["background"]
+	reference := chartReferenceForDependency(t, app, dependency.ID)
+	if reference.ResolvedChartID != "" || hasOutgoingEdge(app.Edges[model.IaCResolvesToChart], reference.ID) {
+		t.Fatalf("folder-scored compatible dependency acquired target: %#v", reference)
+	}
+	assertDiagnosticCode(t, app, helmAmbiguousVendoredDependencyCode)
+	assertResolvedApplication(t, app)
 }
 
 func TestResolveVendoredAmbiguityConsidersOnlyCompatibleCharts(t *testing.T) {
@@ -346,6 +380,97 @@ func TestResolveUsesOneHelmNamespaceForRootAndAliasedDependency(t *testing.T) {
 	assertResolvedApplication(t, app)
 }
 
+func TestResolveRetainsUnmatchedPhysicalChildrenInRootNamespace(t *testing.T) {
+	tests := []struct {
+		name         string
+		dependencies string
+	}{
+		{name: "undeclared"},
+		{name: "incompatible declaration", dependencies: "dependencies:\n  - name: worker\n    version: 9.x\n    repository: file://charts/worker\n"},
+		{name: "unrelated declaration", dependencies: "dependencies:\n  - name: other\n    version: 1.x\n    repository: file://charts/other\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := map[string]*model.Artifact{
+				"root/Chart.yaml":                             testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\n"+test.dependencies),
+				"root/templates/_helpers.tpl":                 testArtifact(t, "root/templates/_helpers.tpl", "{{ define \"parent.only\" }}parent{{ end }}\n"),
+				"root/templates/use.yaml":                     testArtifact(t, "root/templates/use.yaml", "{{ include \"child.only\" . }}\n"),
+				"root/charts/physical/Chart.yaml":             testArtifact(t, "root/charts/physical/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.2.0\n"),
+				"root/charts/physical/templates/_helpers.tpl": testArtifact(t, "root/charts/physical/templates/_helpers.tpl", "{{ define \"child.only\" }}child{{ end }}\n"),
+				"root/charts/physical/templates/use.yaml":     testArtifact(t, "root/charts/physical/templates/use.yaml", "{{ include \"parent.only\" . }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			delta, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := model.Apply(app, delta); err != nil {
+				t.Fatal(err)
+			}
+			parentDefinition := onlyNamedTemplate(t, artifacts["root/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "parent.only")
+			childDefinition := onlyNamedTemplate(t, artifacts["root/charts/physical/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "child.only")
+			parentCall := onlyTemplateCall(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			childCall := onlyTemplateCall(t, artifacts["root/charts/physical/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			if parentCall.TargetID != childDefinition.ID {
+				t.Errorf("parent call target = %q, want physical child definition %q", parentCall.TargetID, childDefinition.ID)
+			}
+			if childCall.TargetID != parentDefinition.ID {
+				t.Errorf("physical child call target = %q, want root definition %q", childCall.TargetID, parentDefinition.ID)
+			}
+			assertResolvedApplication(t, app)
+		})
+	}
+}
+
+func TestResolveRetainsUndeclaredNestedPhysicalChildInRootNamespace(t *testing.T) {
+	artifacts := map[string]*model.Artifact{
+		"root/Chart.yaml":                                           testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\n"),
+		"root/templates/use.yaml":                                   testArtifact(t, "root/templates/use.yaml", "{{ include \"grandchild.only\" . }}\n"),
+		"root/charts/physical/Chart.yaml":                           testArtifact(t, "root/charts/physical/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.2.0\n"),
+		"root/charts/physical/charts/nested/Chart.yaml":             testArtifact(t, "root/charts/physical/charts/nested/Chart.yaml", "apiVersion: v2\nname: helper\nversion: 1.1.0\n"),
+		"root/charts/physical/charts/nested/templates/_helpers.tpl": testArtifact(t, "root/charts/physical/charts/nested/templates/_helpers.tpl", "{{ define \"grandchild.only\" }}grandchild{{ end }}\n"),
+	}
+	app := parseL1Application(t, artifacts, nil)
+	delta, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Apply(app, delta); err != nil {
+		t.Fatal(err)
+	}
+	definition := onlyNamedTemplate(t, artifacts["root/charts/physical/charts/nested/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "grandchild.only")
+	call := onlyTemplateCall(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+	if call.TargetID != definition.ID {
+		t.Fatalf("root call target = %q, want nested physical definition %q", call.TargetID, definition.ID)
+	}
+	assertResolvedApplication(t, app)
+}
+
+func TestResolveExcludesPhysicalChildFoldersIgnoredByHelmLoader(t *testing.T) {
+	artifacts := map[string]*model.Artifact{
+		"root/Chart.yaml":                             testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\n"),
+		"root/templates/use.yaml":                     testArtifact(t, "root/templates/use.yaml", "{{ include \"ignored.only\" . }} {{ include \"hidden.only\" . }}\n"),
+		"root/charts/_ignored/Chart.yaml":             testArtifact(t, "root/charts/_ignored/Chart.yaml", "apiVersion: v2\nname: ignored\nversion: 1.0.0\n"),
+		"root/charts/_ignored/templates/_helpers.tpl": testArtifact(t, "root/charts/_ignored/templates/_helpers.tpl", "{{ define \"ignored.only\" }}ignored{{ end }}\n"),
+		"root/charts/.hidden/Chart.yaml":              testArtifact(t, "root/charts/.hidden/Chart.yaml", "apiVersion: v2\nname: hidden\nversion: 1.0.0\n"),
+		"root/charts/.hidden/templates/_helpers.tpl":  testArtifact(t, "root/charts/.hidden/templates/_helpers.tpl", "{{ define \"hidden.only\" }}hidden{{ end }}\n"),
+	}
+	app := parseL1Application(t, artifacts, nil)
+	delta, err := resolve(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Apply(app, delta); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate).TemplateCalls {
+		if call.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], call.ID) {
+			t.Errorf("Helm-loader-ignored child supplied template target: %#v", call)
+		}
+	}
+	assertResolvedApplication(t, app)
+}
+
 func TestResolveExcludesDisabledVendoredDependencyFromRenderNamespace(t *testing.T) {
 	artifacts := map[string]*model.Artifact{
 		"platform/Chart.yaml":                           testArtifact(t, "platform/Chart.yaml", "apiVersion: v2\nname: platform\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 2.x\n    repository: file://charts/worker\n    condition: background.enabled\n"),
@@ -397,6 +522,94 @@ func TestResolveUsesRootScopedConditionForNestedDependency(t *testing.T) {
 	call := onlyTemplateCall(t, artifacts["root/charts/worker/charts/helper/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
 	if call.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], call.ID) {
 		t.Fatalf("root-disabled nested dependency call acquired target: %#v", call)
+	}
+}
+
+func TestResolveMatchesHelmConditionAlternativeWhitespace(t *testing.T) {
+	tests := []struct {
+		name        string
+		condition   string
+		values      string
+		tags        string
+		wantEnabled bool
+	}{
+		{name: "unspaced alternative finds false", condition: "missing,background.enabled", values: "background:\n  enabled: false\n"},
+		{name: "spaced alternative is a distinct missing path", condition: "missing, background.enabled", values: "background:\n  enabled: false\n", wantEnabled: true},
+		{name: "whole condition is trimmed", condition: "  missing,background.enabled  ", values: "background:\n  enabled: false\n"},
+		{name: "tags remain effective when spaced alternatives are missing", condition: "missing, background.enabled", values: "tags:\n  optional: false\nbackground:\n  enabled: false\n", tags: "    tags: [optional]\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			chartSource := fmt.Sprintf("apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 1.x\n    repository: file://charts/worker\n%s    condition: %q\n", test.tags, test.condition)
+			artifacts := map[string]*model.Artifact{
+				"root/Chart.yaml":                           testArtifact(t, "root/Chart.yaml", chartSource),
+				"root/values.yaml":                          testArtifact(t, "root/values.yaml", test.values),
+				"root/templates/use.yaml":                   testArtifact(t, "root/templates/use.yaml", "{{ include \"child.only\" . }}\n"),
+				"root/charts/worker/Chart.yaml":             testArtifact(t, "root/charts/worker/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.2.0\n"),
+				"root/charts/worker/templates/_helpers.tpl": testArtifact(t, "root/charts/worker/templates/_helpers.tpl", "{{ define \"child.only\" }}child{{ end }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			delta, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := model.Apply(app, delta); err != nil {
+				t.Fatal(err)
+			}
+			call := onlyTemplateCall(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			definition := onlyNamedTemplate(t, artifacts["root/charts/worker/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "child.only")
+			if test.wantEnabled && call.TargetID != definition.ID {
+				t.Fatalf("enabled dependency call target = %q, want %q", call.TargetID, definition.ID)
+			}
+			if !test.wantEnabled && (call.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], call.ID)) {
+				t.Fatalf("disabled dependency call acquired target: %#v", call)
+			}
+			assertResolvedApplication(t, app)
+		})
+	}
+}
+
+func TestResolveMatchesHelmNestedConditionAndTagHandling(t *testing.T) {
+	tests := []struct {
+		name        string
+		condition   string
+		tags        string
+		values      string
+		wantEnabled bool
+	}{
+		{name: "nested unspaced condition", condition: "missing,sidecar.enabled", values: "background:\n  sidecar:\n    enabled: false\n"},
+		{name: "nested spaced condition", condition: "missing, sidecar.enabled", values: "background:\n  sidecar:\n    enabled: false\n", wantEnabled: true},
+		{name: "nested dependency uses root tags", condition: "missing, sidecar.enabled", tags: "    tags: [optional]\n", values: "tags:\n  optional: false\nbackground:\n  sidecar:\n    enabled: false\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			childSource := fmt.Sprintf("apiVersion: v2\nname: worker\nversion: 1.2.0\ndependencies:\n  - name: helper\n    alias: sidecar\n    version: 1.x\n    repository: file://charts/helper\n%s    condition: %q\n", test.tags, test.condition)
+			artifacts := map[string]*model.Artifact{
+				"root/Chart.yaml":                                         testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n  - name: worker\n    alias: background\n    version: 1.x\n    repository: file://charts/worker\n"),
+				"root/values.yaml":                                        testArtifact(t, "root/values.yaml", test.values),
+				"root/templates/use.yaml":                                 testArtifact(t, "root/templates/use.yaml", "{{ include \"nested.only\" . }}\n"),
+				"root/charts/worker/Chart.yaml":                           testArtifact(t, "root/charts/worker/Chart.yaml", childSource),
+				"root/charts/worker/charts/helper/Chart.yaml":             testArtifact(t, "root/charts/worker/charts/helper/Chart.yaml", "apiVersion: v2\nname: helper\nversion: 1.1.0\n"),
+				"root/charts/worker/charts/helper/templates/_helpers.tpl": testArtifact(t, "root/charts/worker/charts/helper/templates/_helpers.tpl", "{{ define \"nested.only\" }}nested{{ end }}\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			delta, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := model.Apply(app, delta); err != nil {
+				t.Fatal(err)
+			}
+			call := onlyTemplateCall(t, artifacts["root/templates/use.yaml"].IaC.(*model.HelmTemplate), "include")
+			definition := onlyNamedTemplate(t, artifacts["root/charts/worker/charts/helper/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "nested.only")
+			if test.wantEnabled && call.TargetID != definition.ID {
+				t.Fatalf("enabled nested dependency call target = %q, want %q", call.TargetID, definition.ID)
+			}
+			if !test.wantEnabled && (call.TargetID != "" || hasOutgoingEdge(app.Edges[model.IaCCallsTemplate], call.ID)) {
+				t.Fatalf("disabled nested dependency call acquired target: %#v", call)
+			}
+			assertResolvedApplication(t, app)
+		})
 	}
 }
 
