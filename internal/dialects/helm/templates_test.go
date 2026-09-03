@@ -3,12 +3,14 @@ package helm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/dialect"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
@@ -565,6 +567,124 @@ func TestTemplateParsingScalesNearLinearly(t *testing.T) {
 	if limit := small*8 + 25*time.Millisecond; large > limit {
 		t.Fatalf("40k actions took %s after 10k took %s; want <= %s", large, small, limit)
 	}
+}
+
+func TestTemplateDenseSingleLineParsingScalesNearLinearly(t *testing.T) {
+	measure := func(actions int) time.Duration {
+		source := strings.Repeat("{{ .Values.item }}", actions)
+		best := time.Duration(1<<63 - 1)
+		for run := 0; run < 3; run++ {
+			artifact := testArtifact(t, "charts/sample/templates/generated-dense.yaml", source)
+			started := time.Now()
+			facet, diagnostics := parseTemplate(artifact, dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"resource"}})
+			duration := time.Since(started)
+			if len(diagnostics) != 0 || len(facet.ValueReferences) != actions {
+				t.Fatalf("actions=%d references=%d diagnostics=%#v", actions, len(facet.ValueReferences), diagnostics)
+			}
+			if duration < best {
+				best = duration
+			}
+		}
+		return best
+	}
+
+	small := measure(2_000)
+	large := measure(8_000)
+	if limit := small*9 + 50*time.Millisecond; large > limit {
+		t.Fatalf("8k dense same-line actions took %s after 2k took %s; want <= %s", large, small, limit)
+	}
+	if large > 5*time.Second {
+		t.Fatalf("8k dense same-line actions took %s; want <= 5s", large)
+	}
+}
+
+func TestTemplateDenseUnicodeLineKeepsExactRuneColumnsAndByteOffsets(t *testing.T) {
+	const actions = 256
+	const action = "{{ .Values.item }}"
+	source := "π界🙂 " + strings.Repeat(action, actions) + "\r\n"
+	artifact := testArtifact(t, "charts/sample/templates/generated-dense-unicode.yaml", source)
+	facet, diagnostics := parseTemplate(artifact, dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"resource"}})
+	if len(diagnostics) != 0 || len(facet.ValueReferences) != actions {
+		t.Fatalf("references=%d diagnostics=%#v", len(facet.ValueReferences), diagnostics)
+	}
+	for occurrence := 0; occurrence < actions; occurrence++ {
+		startColumn := 5 + occurrence*18
+		startByte := 10 + occurrence*18
+		key := fmt.Sprintf("1:%d", startColumn)
+		reference := facet.ValueReferences[key]
+		want := model.Span{Start: [2]int{1, startColumn}, End: [2]int{1, startColumn + 18}, Bytes: [2]int{startByte, startByte + 18}}
+		if reference == nil || reference.PathExpression != "item" || reference.Span != want {
+			t.Fatalf("reference %d/%q = %#v, want item at %#v", occurrence, key, reference, want)
+		}
+	}
+}
+
+func TestTemplateSourceIndexPreservesClampedAndInvalidBoundaryPositions(t *testing.T) {
+	index, err := newTemplateSourceIndex(context.Background(), "☃\xff\r\n界")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int][2]int{
+		-1:  {1, 1},
+		0:   {1, 1},
+		1:   {1, 2},
+		2:   {1, 3},
+		3:   {1, 2},
+		4:   {1, 3},
+		5:   {1, 4},
+		6:   {2, 1},
+		7:   {2, 2},
+		8:   {2, 3},
+		9:   {2, 2},
+		100: {2, 2},
+	}
+	for offset, position := range want {
+		if got := index.position(offset); got != position {
+			t.Errorf("position(%d) = %v, want %v", offset, got, position)
+		}
+	}
+}
+
+func TestTemplateSourceIndexConstructionHonorsCancellation(t *testing.T) {
+	ctx := &cancelAfterIndexChecksContext{Context: context.Background(), remaining: 2}
+	_, err := newTemplateSourceIndex(ctx, strings.Repeat("π", 8_192))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("newTemplateSourceIndex() error = %v, want context cancellation", err)
+	}
+	if ctx.remaining >= 0 {
+		t.Fatalf("context checks remaining = %d, want cancellation after construction started", ctx.remaining)
+	}
+}
+
+func TestTemplateSourceIndexUsesBoundedLinearStorageForMultiMegabyteFiles(t *testing.T) {
+	for name, source := range map[string]string{
+		"dense line": strings.Repeat("πx", 1<<20),
+		"many lines": strings.Repeat("x\n", 2<<20),
+	} {
+		t.Run(name, func(t *testing.T) {
+			index, err := newTemplateSourceIndex(context.Background(), source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			storageBytes := cap(index.lineStarts)*int(unsafe.Sizeof(int(0))) + cap(index.runeCheckpoints)*int(unsafe.Sizeof(templatePositionCheckpoint{}))
+			if limit := len(source)*12 + 1024; storageBytes > limit {
+				t.Fatalf("%d source bytes use %d index bytes, want <= %d", len(source), storageBytes, limit)
+			}
+		})
+	}
+}
+
+type cancelAfterIndexChecksContext struct {
+	context.Context
+	remaining int
+}
+
+func (ctx *cancelAfterIndexChecksContext) Err() error {
+	ctx.remaining--
+	if ctx.remaining < 0 {
+		return context.Canceled
+	}
+	return nil
 }
 
 func TestTemplateFrontendCancellationInterruptsLargeParse(t *testing.T) {

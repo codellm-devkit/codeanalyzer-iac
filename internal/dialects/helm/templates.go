@@ -58,9 +58,15 @@ type templateFrame struct {
 	action templateAction
 }
 
+type templatePositionCheckpoint struct {
+	offset int
+	column int
+}
+
 type templateSourceIndex struct {
-	source     string
-	lineStarts []int
+	source          string
+	lineStarts      []int
+	runeCheckpoints []templatePositionCheckpoint
 }
 
 type templateFacts struct {
@@ -109,10 +115,14 @@ func parseTemplateContext(ctx context.Context, artifact *model.Artifact, detecti
 	if err != nil {
 		return nil, nil, err
 	}
+	sourceIndex, err := newTemplateSourceIndex(ctx, artifact.Source)
+	if err != nil {
+		return nil, nil, err
+	}
 	facts := &templateFacts{
 		artifact:         artifact,
 		facet:            facet,
-		index:            newTemplateSourceIndex(artifact.Source),
+		index:            sourceIndex,
 		actions:          actions,
 		occurrenceCounts: map[string]int{},
 		ctx:              ctx,
@@ -485,14 +495,33 @@ func blankTemplateRange(ctx context.Context, source []byte, start, end int) erro
 	return contextError(ctx)
 }
 
-func newTemplateSourceIndex(source string) templateSourceIndex {
+func newTemplateSourceIndex(ctx context.Context, source string) (templateSourceIndex, error) {
 	lineStarts := []int{0}
-	for offset, character := range []byte(source) {
+	checkpoints := make([]templatePositionCheckpoint, 0, len(source)/64)
+	column := 1
+	lastCheckpoint := 0
+	iteration := 0
+	for offset, character := range source {
+		if err := checkTemplateContext(ctx, iteration); err != nil {
+			return templateSourceIndex{}, err
+		}
+		iteration++
 		if character == '\n' {
 			lineStarts = append(lineStarts, offset+1)
+			column = 1
+			lastCheckpoint = offset + 1
+			continue
 		}
+		if offset-lastCheckpoint >= 64 {
+			checkpoints = append(checkpoints, templatePositionCheckpoint{offset: offset, column: column})
+			lastCheckpoint = offset
+		}
+		column++
 	}
-	return templateSourceIndex{source: source, lineStarts: lineStarts}
+	if err := contextError(ctx); err != nil {
+		return templateSourceIndex{}, err
+	}
+	return templateSourceIndex{source: source, lineStarts: lineStarts, runeCheckpoints: checkpoints}, nil
 }
 
 func (index templateSourceIndex) position(offset int) [2]int {
@@ -506,7 +535,16 @@ func (index templateSourceIndex) position(offset int) [2]int {
 	if line < 0 {
 		line = 0
 	}
-	column := utf8.RuneCountInString(index.source[index.lineStarts[line]:offset]) + 1
+	checkpointOffset := index.lineStarts[line]
+	checkpointColumn := 1
+	checkpoint := sort.Search(len(index.runeCheckpoints), func(candidate int) bool {
+		return index.runeCheckpoints[candidate].offset > offset
+	}) - 1
+	if checkpoint >= 0 && index.runeCheckpoints[checkpoint].offset >= checkpointOffset {
+		checkpointOffset = index.runeCheckpoints[checkpoint].offset
+		checkpointColumn = index.runeCheckpoints[checkpoint].column
+	}
+	column := checkpointColumn + utf8.RuneCountInString(index.source[checkpointOffset:offset])
 	return [2]int{line + 1, column}
 }
 
