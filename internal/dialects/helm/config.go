@@ -9,7 +9,6 @@ import (
 
 	"github.com/goccy/go-yaml"
 	"github.com/goccy/go-yaml/ast"
-	"helm.sh/helm/v4/pkg/chart/common"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
@@ -114,7 +113,6 @@ func defaultProfile(chart *model.Artifact) *model.HelmRenderProfile {
 		Namespace:   defaultNamespaceName,
 		ValueLayers: map[string]*model.HelmValueLayer{},
 		APIVersions: profileAPIVersions(nil),
-		KubeVersion: common.DefaultCapabilities.KubeVersion.String(),
 	}
 }
 
@@ -220,10 +218,6 @@ func configProfile(delta *model.Delta, scope configScope, index int, render rend
 	if namespace == "" {
 		namespace = defaultNamespaceName
 	}
-	kubeVersion := strings.TrimSpace(render.KubeVersion)
-	if kubeVersion == "" {
-		kubeVersion = common.DefaultCapabilities.KubeVersion.String()
-	}
 	profile := &model.HelmRenderProfile{
 		ID:          model.SemanticID(scope.appName, configDialectName, "profile", name),
 		Kind:        "helm_render_profile",
@@ -234,7 +228,7 @@ func configProfile(delta *model.Delta, scope configScope, index int, render rend
 		Namespace:   namespace,
 		ValueLayers: map[string]*model.HelmValueLayer{},
 		APIVersions: profileAPIVersions(render.APIVersions),
-		KubeVersion: kubeVersion,
+		KubeVersion: strings.TrimSpace(render.KubeVersion),
 	}
 
 	// Configured files are layered in declaration order and literal overrides
@@ -353,17 +347,13 @@ func mappingPairs(node ast.Node) []*ast.MappingValueNode {
 	return nil
 }
 
-// profileAPIVersions records the pinned Helm capability set plus any configured
-// additions. The SDK's own order comes from map iteration, so it is sorted to
-// keep the emitted model byte-identical across runs.
+// profileAPIVersions records only the api versions the configuration adds to
+// Helm's pinned defaults, which the renderer supplies. Helm's own default set
+// differs between test and production builds, so persisting it would make the
+// emitted model depend on how the analyzer was built.
 func profileAPIVersions(configured []string) []string {
-	versions := make([]string, 0, len(common.DefaultCapabilities.APIVersions)+len(configured))
-	versions = append(versions, common.DefaultCapabilities.APIVersions...)
-	sort.Strings(versions)
-	seen := make(map[string]bool, len(versions))
-	for _, version := range versions {
-		seen[version] = true
-	}
+	versions := make([]string, 0, len(configured))
+	seen := make(map[string]bool, len(configured))
 	for _, version := range configured {
 		version = strings.TrimSpace(version)
 		if version == "" || seen[version] {
@@ -372,6 +362,7 @@ func profileAPIVersions(configured []string) []string {
 		seen[version] = true
 		versions = append(versions, version)
 	}
+	sort.Strings(versions)
 	return versions
 }
 

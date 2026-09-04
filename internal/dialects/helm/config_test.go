@@ -4,11 +4,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"sort"
 	"strings"
 	"testing"
-
-	"helm.sh/helm/v4/pkg/chart/common"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/ingest"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/ingest/filesystem"
@@ -64,11 +61,11 @@ func TestDefaultProfileIsChartContainedAndConfigFree(t *testing.T) {
 	if len(profile.ValueLayers) != 0 {
 		t.Errorf("default profile value_layers = %#v, want chart defaults only", profile.ValueLayers)
 	}
-	if want := common.DefaultCapabilities.KubeVersion.String(); profile.KubeVersion != want {
-		t.Errorf("default kube_version = %q, want pinned Helm default %q", profile.KubeVersion, want)
+	if profile.KubeVersion != "" {
+		t.Errorf("default kube_version = %q, want the renderer's pinned default", profile.KubeVersion)
 	}
-	if want := sortedStrings(common.DefaultCapabilities.APIVersions); !reflect.DeepEqual(profile.APIVersions, want) {
-		t.Errorf("default api_versions = %#v, want pinned Helm defaults %#v", profile.APIVersions, want)
+	if !reflect.DeepEqual(profile.APIVersions, []string{}) {
+		t.Errorf("default api_versions = %#v, want no additions to the renderer's pinned defaults", profile.APIVersions)
 	}
 	if direct := defaultProfile(chart); !reflect.DeepEqual(direct, profile) {
 		t.Errorf("defaultProfile(chart) = %#v, want the contained profile %#v", direct, profile)
@@ -144,8 +141,8 @@ func TestConfigProfilesAreConfigContainedWithOrderedLayers(t *testing.T) {
 	if production.KubeVersion != "v1.31.0" {
 		t.Errorf("config profile kube_version = %q, want %q", production.KubeVersion, "v1.31.0")
 	}
-	if want := append(sortedStrings(common.DefaultCapabilities.APIVersions), "example.test/v1alpha1"); !reflect.DeepEqual(production.APIVersions, want) {
-		t.Errorf("config profile api_versions = %#v, want pinned defaults plus configured versions %#v", production.APIVersions, want)
+	if want := []string{"example.test/v1alpha1"}; !reflect.DeepEqual(production.APIVersions, want) {
+		t.Errorf("config profile api_versions = %#v, want only the configured additions %#v", production.APIVersions, want)
 	}
 
 	imageKey := config.ConfigKeys["renders.0.set.image%2Etag"]
@@ -204,8 +201,8 @@ func TestConfigProfilesAreConfigContainedWithOrderedLayers(t *testing.T) {
 	if want := "profiles-demo-" + chart.SHA256[:8]; minimal.ReleaseName != want || minimal.Namespace != "default" {
 		t.Errorf("minimal profile release/namespace = %q/%q, want %q/default", minimal.ReleaseName, minimal.Namespace, want)
 	}
-	if want := common.DefaultCapabilities.KubeVersion.String(); minimal.KubeVersion != want {
-		t.Errorf("minimal kube_version = %q, want pinned Helm default %q", minimal.KubeVersion, want)
+	if minimal.KubeVersion != "" || !reflect.DeepEqual(minimal.APIVersions, []string{}) {
+		t.Errorf("minimal capabilities = %q/%#v, want the renderer's pinned defaults", minimal.KubeVersion, minimal.APIVersions)
 	}
 
 	document := mustJSON(t, model.NewAnalysis(3, app))
@@ -381,10 +378,4 @@ func diagnosticsForArtifact(app *model.Application, artifactID string) []*model.
 		}
 	}
 	return diagnostics
-}
-
-func sortedStrings(values []string) []string {
-	sorted := append([]string(nil), values...)
-	sort.Strings(sorted)
-	return sorted
 }
