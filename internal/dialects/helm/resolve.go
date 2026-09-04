@@ -760,6 +760,7 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 	definitionIDsByName := map[string]map[string]bool{}
 	templateArtifacts := map[string]*model.Artifact{}
 	uncertainCallArtifacts := map[string]bool{}
+	guaranteedCallArtifacts := map[string]bool{}
 	alternativeCountByGroup := map[string]int{}
 	collectInstance := func(instance renderChartInstance, uncertaintyGroup, uncertaintyAlternative string) error {
 		if err := contextError(ctx); err != nil {
@@ -894,6 +895,13 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 			for _, source := range sources {
 				uncertainCallArtifacts[source.artifact.ID] = true
 			}
+		} else {
+			// This logical file is rendered from exactly one physical artifact in
+			// every possible Helm render input, so that artifact's calls are present
+			// even when another render instance of the same artifact is uncertain.
+			for _, source := range sources {
+				guaranteedCallArtifacts[source.artifact.ID] = true
+			}
 		}
 		if len(deterministicSourceIDs) > 1 {
 			sourceIDs := sortedKeysLocal(deterministicSourceIDs)
@@ -962,7 +970,7 @@ func resolveRenderTreeTemplates(ctx context.Context, delta *model.Delta, index *
 				continue
 			}
 			winner := winners[call.NameExpression]
-			if uncertainCallArtifacts[artifact.ID] || winner == nil {
+			if (uncertainCallArtifacts[artifact.ID] && !guaranteedCallArtifacts[artifact.ID]) || winner == nil {
 				continue
 			}
 			targetID := call.TargetID

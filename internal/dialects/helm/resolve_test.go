@@ -1364,3 +1364,49 @@ func jsonDocument(t *testing.T, value any) any {
 	}
 	return document
 }
+
+func TestResolveKeepsCallsFromGuaranteedInstanceOfAmbiguousCandidate(t *testing.T) {
+	tests := []struct {
+		name       string
+		exactAlias string
+		broadAlias string
+		exactFirst bool
+	}{
+		{name: "exact alias sorts first", exactAlias: "alpha", broadAlias: "zeta", exactFirst: true},
+		{name: "exact alias sorts last", exactAlias: "zeta", broadAlias: "alpha", exactFirst: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			exact := fmt.Sprintf("  - name: worker\n    alias: %s\n    version: \"=1.0.0\"\n    repository: file://charts/worker\n", test.exactAlias)
+			broad := fmt.Sprintf("  - name: worker\n    alias: %s\n    version: 1.x\n    repository: file://charts/worker\n", test.broadAlias)
+			dependencies := exact + broad
+			if !test.exactFirst {
+				dependencies = broad + exact
+			}
+			artifacts := map[string]*model.Artifact{
+				"root/Chart.yaml":                               testArtifact(t, "root/Chart.yaml", "apiVersion: v2\nname: root\nversion: 1.0.0\ndependencies:\n"+dependencies),
+				"root/templates/_helpers.tpl":                   testArtifact(t, "root/templates/_helpers.tpl", "{{ define \"parent.only\" }}parent{{ end }}\n"),
+				"root/charts/compatible-a/Chart.yaml":           testArtifact(t, "root/charts/compatible-a/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.0.0\n"),
+				"root/charts/compatible-a/templates/job.yaml":   testArtifact(t, "root/charts/compatible-a/templates/job.yaml", "{{ include \"parent.only\" . }}\n"),
+				"root/charts/compatible-b/Chart.yaml":           testArtifact(t, "root/charts/compatible-b/Chart.yaml", "apiVersion: v2\nname: worker\nversion: 1.1.0\n"),
+				"root/charts/compatible-b/templates/other.yaml": testArtifact(t, "root/charts/compatible-b/templates/other.yaml", "# no calls\n"),
+			}
+			app := parseL1Application(t, artifacts, nil)
+			delta, err := resolve(app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := model.Apply(app, delta); err != nil {
+				t.Fatal(err)
+			}
+
+			parentDefinition := onlyNamedTemplate(t, artifacts["root/templates/_helpers.tpl"].IaC.(*model.HelmTemplate), "parent.only")
+			call := onlyTemplateCall(t, artifacts["root/charts/compatible-a/templates/job.yaml"].IaC.(*model.HelmTemplate), "include")
+			if call.TargetID != parentDefinition.ID {
+				t.Fatalf("guaranteed instance call target = %q, want %q", call.TargetID, parentDefinition.ID)
+			}
+			assertEdge(t, app, model.IaCCallsTemplate, call.ID, parentDefinition.ID)
+			assertResolvedApplication(t, app)
+		})
+	}
+}
