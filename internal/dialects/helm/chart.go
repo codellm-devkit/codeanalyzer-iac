@@ -182,13 +182,8 @@ func parseChart(ctx context.Context, artifact *model.Artifact, detection dialect
 		facet.Status = "partial"
 	}
 	if facet.Status != "failed" {
-		appName, err := appNameFromArtifactID(artifact.ID)
+		aliasID, err := chartAliasID(artifact)
 		if err == nil {
-			aliasSegments := []string{"chart"}
-			if directory := path.Dir(artifact.Path); directory != "." {
-				aliasSegments = append(aliasSegments, strings.Split(directory, "/")...)
-			}
-			aliasID := model.SemanticID(appName, dialectName, aliasSegments...)
 			alias := model.IdentityAlias{ID: aliasID, Kind: "helm_chart", Target: artifact.ID}
 			patch := delta.ArtifactPatches[artifact.ID]
 			patch.Aliases = []model.IdentityAlias{alias}
@@ -829,6 +824,21 @@ func appNameFromArtifactID(id string) (string, error) {
 		return "", fmt.Errorf("artifact id has no application segment: %s", id)
 	}
 	return url.PathUnescape(segment)
+}
+
+// chartAliasID returns a chart's directory-scoped identity, which is stable
+// across the chart's own file name and is the parent of chart-scoped semantic
+// identities such as render profiles.
+func chartAliasID(chart *model.Artifact) (string, error) {
+	appName, err := appNameFromArtifactID(chart.ID)
+	if err != nil {
+		return "", err
+	}
+	segments := []string{"chart"}
+	if directory := path.Dir(chart.Path); directory != "." {
+		segments = append(segments, strings.Split(directory, "/")...)
+	}
+	return model.SemanticID(appName, dialectName, segments...), nil
 }
 
 func semanticIDForArtifact(artifact *model.Artifact, trailing ...string) string {

@@ -438,6 +438,9 @@ func acceptedNodeLabels(node model.Node) []string {
 		case *model.HelmIgnore:
 			labels = append(labels, "IaCArtifact", "HelmArtifact", "HelmIgnore")
 		}
+		if typed.CodeAnalyzerIaCConfig != nil {
+			labels = append(labels, "CodeAnalyzerIaCConfig")
+		}
 		return labels
 	case *model.ConfigKey:
 		labels := []string{"ConfigKey"}
@@ -459,6 +462,10 @@ func acceptedNodeLabels(node model.Node) []string {
 		return []string{"HelmLookupReference"}
 	case *model.HelmChartReference:
 		return []string{"HelmChartReference"}
+	case *model.HelmRenderProfile:
+		return []string{"HelmRenderProfile"}
+	case *model.HelmValueLayer:
+		return []string{"HelmValueLayer"}
 	case *model.Package:
 		return []string{"Package"}
 	case *model.IdentityAlias:

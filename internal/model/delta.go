@@ -25,6 +25,7 @@ type ArtifactPatch struct {
 	Facet                 ArtifactFacet
 	ConfigFacet           *CodeAnalyzerIaCConfig
 	ConfigKeys            map[string]*ConfigKey
+	RenderProfiles        map[string]*HelmRenderProfile
 	Aliases               []IdentityAlias
 	TemplateCallTargets   map[string]string
 	ValueReferenceTargets map[string]string
@@ -133,6 +134,15 @@ func preflightArtifactPatch(artifact *Artifact, patch ArtifactPatch) error {
 	if err := checkFacts(artifact.ConfigKeys, patch.ConfigKeys, "config key"); err != nil {
 		return err
 	}
+	if len(patch.RenderProfiles) != 0 {
+		chart, isChart := effectiveFacet.(*HelmChart)
+		if !isChart || chart == nil {
+			return &ConflictError{Key: "render profile on non-chart artifact " + artifact.ID}
+		}
+		if err := checkFacts(chart.RenderProfiles, patch.RenderProfiles, "render profile"); err != nil {
+			return err
+		}
+	}
 	template, isTemplate := effectiveFacet.(*HelmTemplate)
 	if len(patch.TemplateCallTargets) != 0 {
 		if !isTemplate || template == nil {
@@ -205,6 +215,9 @@ func applyArtifactPatch(artifact *Artifact, patch ArtifactPatch) error {
 	if err := mergeFacts(artifact.ConfigKeys, patch.ConfigKeys, "config key"); err != nil {
 		return err
 	}
+	if err := applyRenderProfiles(artifact, patch.RenderProfiles); err != nil {
+		return err
+	}
 	if err := applyTemplateCallTargets(artifact, patch.TemplateCallTargets); err != nil {
 		return err
 	}
@@ -228,6 +241,20 @@ func applyArtifactPatch(artifact *Artifact, patch ArtifactPatch) error {
 	}
 	sort.Slice(artifact.Aliases, func(i, j int) bool { return artifact.Aliases[i].ID < artifact.Aliases[j].ID })
 	return nil
+}
+
+func applyRenderProfiles(artifact *Artifact, profiles map[string]*HelmRenderProfile) error {
+	if len(profiles) == 0 {
+		return nil
+	}
+	chart, ok := artifact.IaC.(*HelmChart)
+	if !ok || chart == nil {
+		return &ConflictError{Key: "render profile on non-chart artifact " + artifact.ID}
+	}
+	if chart.RenderProfiles == nil {
+		chart.RenderProfiles = map[string]*HelmRenderProfile{}
+	}
+	return mergeFacts(chart.RenderProfiles, profiles, "render profile")
 }
 
 func applyTemplateCallTargets(artifact *Artifact, targets map[string]string) error {
