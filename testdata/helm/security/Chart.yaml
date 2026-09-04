@@ -1,0 +1,4 @@
+apiVersion: v2
+name: security
+version: 0.1.0
+description: Fixture chart whose rendered Secret carries unique plaintext.

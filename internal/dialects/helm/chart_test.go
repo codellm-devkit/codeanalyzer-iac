@@ -466,6 +466,12 @@ func acceptedNodeLabels(node model.Node) []string {
 		return []string{"HelmRenderProfile"}
 	case *model.HelmValueLayer:
 		return []string{"HelmValueLayer"}
+	case *model.HelmRender:
+		return []string{"HelmRender"}
+	case *model.KubernetesResource:
+		return []string{"KubernetesResource"}
+	case *model.KubernetesResourceAddress:
+		return []string{"KubernetesResourceAddress"}
 	case *model.Package:
 		return []string{"Package"}
 	case *model.IdentityAlias:

@@ -1,0 +1,4 @@
+apiVersion: v2
+name: render-failures
+version: 0.1.0
+description: Fixture chart whose second template document cannot be decoded.

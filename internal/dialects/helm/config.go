@@ -315,13 +315,7 @@ func resolveConfigSelector(artifacts map[string]*model.Artifact, appName, select
 // render entry, keyed by the raw configured key.
 func setKeySpans(entry ast.Node) map[string]model.Span {
 	spans := map[string]model.Span{}
-	var overrides ast.Node
-	for _, pair := range mappingPairs(entry) {
-		if pair != nil && keyName(pair.Key) == "set" {
-			overrides = pair.Value
-		}
-	}
-	for _, pair := range mappingPairs(overrides) {
+	for _, pair := range setPairs(entry) {
 		if pair == nil || pair.Key == nil || pair.Key.GetToken() == nil {
 			continue
 		}
@@ -330,6 +324,18 @@ func setKeySpans(entry ast.Node) map[string]model.Span {
 		}
 	}
 	return spans
+}
+
+// setPairs returns the literal override pairs one render entry declares, in
+// document order.
+func setPairs(entry ast.Node) []*ast.MappingValueNode {
+	var overrides ast.Node
+	for _, pair := range mappingPairs(entry) {
+		if pair != nil && keyName(pair.Key) == "set" {
+			overrides = pair.Value
+		}
+	}
+	return mappingPairs(overrides)
 }
 
 // mappingPairs returns a node's own mapping pairs. goccy models a single-pair

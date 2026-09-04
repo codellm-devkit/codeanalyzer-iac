@@ -26,6 +26,7 @@ type ArtifactPatch struct {
 	ConfigFacet           *CodeAnalyzerIaCConfig
 	ConfigKeys            map[string]*ConfigKey
 	RenderProfiles        map[string]*HelmRenderProfile
+	Renders               map[string]*HelmRender
 	Aliases               []IdentityAlias
 	TemplateCallTargets   map[string]string
 	ValueReferenceTargets map[string]string
@@ -143,6 +144,15 @@ func preflightArtifactPatch(artifact *Artifact, patch ArtifactPatch) error {
 			return err
 		}
 	}
+	if len(patch.Renders) != 0 {
+		chart, isChart := effectiveFacet.(*HelmChart)
+		if !isChart || chart == nil {
+			return &ConflictError{Key: "render on non-chart artifact " + artifact.ID}
+		}
+		if err := checkFacts(chart.Renders, patch.Renders, "render"); err != nil {
+			return err
+		}
+	}
 	template, isTemplate := effectiveFacet.(*HelmTemplate)
 	if len(patch.TemplateCallTargets) != 0 {
 		if !isTemplate || template == nil {
@@ -218,6 +228,9 @@ func applyArtifactPatch(artifact *Artifact, patch ArtifactPatch) error {
 	if err := applyRenderProfiles(artifact, patch.RenderProfiles); err != nil {
 		return err
 	}
+	if err := applyRenders(artifact, patch.Renders); err != nil {
+		return err
+	}
 	if err := applyTemplateCallTargets(artifact, patch.TemplateCallTargets); err != nil {
 		return err
 	}
@@ -255,6 +268,22 @@ func applyRenderProfiles(artifact *Artifact, profiles map[string]*HelmRenderProf
 		chart.RenderProfiles = map[string]*HelmRenderProfile{}
 	}
 	return mergeFacts(chart.RenderProfiles, profiles, "render profile")
+}
+
+// applyRenders merges L3 render facts onto the chart they render. Chart facets
+// are applied at L1, so a render can only reach the chart through a patch.
+func applyRenders(artifact *Artifact, renders map[string]*HelmRender) error {
+	if len(renders) == 0 {
+		return nil
+	}
+	chart, ok := artifact.IaC.(*HelmChart)
+	if !ok || chart == nil {
+		return &ConflictError{Key: "render on non-chart artifact " + artifact.ID}
+	}
+	if chart.Renders == nil {
+		chart.Renders = map[string]*HelmRender{}
+	}
+	return mergeFacts(chart.Renders, renders, "render")
 }
 
 func applyTemplateCallTargets(artifact *Artifact, targets map[string]string) error {
