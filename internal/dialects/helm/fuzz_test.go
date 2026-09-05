@@ -53,7 +53,7 @@ func FuzzHelmConfigNeverPanics(f *testing.F) {
 	f.Fuzz(func(t *testing.T, source []byte) {
 		artifact := fuzzArtifact(t, ".codeanalyzer-iac.yaml", source)
 		app := model.NewApplication("test-app", map[string]*model.Artifact{artifact.Path: artifact})
-		_, _ = parseConfig(app, artifact.ID)
+		_, _ = BuildProfiles(app, artifact.ID)
 	})
 }
 

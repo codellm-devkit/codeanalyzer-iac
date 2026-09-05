@@ -142,7 +142,7 @@ func analyzeGuarded(t *testing.T) *model.Analysis {
 		source.artifacts["conflicted/Chart.yaml"].ID: digestOf("something else entirely"),
 	}
 	opts := options.Options{AppName: "payments", AnalysisLevel: 3, Jobs: 1}
-	analysis, err := core.New(opts, Guard(source, lookup), dialect.NewRegistry(helm.New())).Analyze(context.Background())
+	analysis, err := core.New(opts, Guard(source, lookup), dialect.NewRegistry(helm.New()), "dev").Analyze(context.Background())
 	if err != nil {
 		t.Fatalf("guarded analysis failed: %v", err)
 	}

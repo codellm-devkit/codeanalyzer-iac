@@ -157,8 +157,37 @@ func TestLoadRetainsInvalidUTF8AsRawArtifact(t *testing.T) {
 	if artifact.Source != "" || artifact.SizeBytes != 0 || artifact.SHA256 != fmt.Sprintf("%x", sum) {
 		t.Fatalf("raw artifact = %#v", artifact)
 	}
-	if !hasDiagnosticCode(got.Diagnostics, "IAC_SOURCE_NOT_TEXT") {
+	diagnostic := got.Diagnostics["IAC_SOURCE_NOT_TEXT:chart.tgz"]
+	if diagnostic == nil {
 		t.Fatalf("got diagnostics %#v", got.Diagnostics)
+	}
+	// An unrecognized artifact stays raw and is not an error, so --strict does
+	// not fail on a repository that contains one.
+	if diagnostic.Severity != "warning" {
+		t.Errorf("severity = %q, want warning", diagnostic.Severity)
+	}
+}
+
+// TestLocationsWithoutARelativePathAreReportedSeparately pins the identity of a
+// diagnostic whose location has no workspace-relative form. New rejects such a
+// selection today, so nothing reaches this with two distinct locations; the
+// guard belongs to the reporting helper rather than to that one caller, so a
+// future caller cannot silently drop the second report.
+func TestLocationsWithoutARelativePathAreReportedSeparately(t *testing.T) {
+	s, err := New("payments", fixtureRoot(t), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := map[string]*model.Diagnostic{}
+	s.addPathDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", "/elsewhere/one.yaml", "cannot inspect source selection")
+	s.addPathDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", "/elsewhere/two.yaml", "cannot inspect source selection")
+
+	identities := map[string]struct{}{}
+	for _, diagnostic := range diagnostics {
+		identities[diagnostic.ID] = struct{}{}
+	}
+	if len(diagnostics) != 2 || len(identities) != 2 {
+		t.Fatalf("diagnostics = %#v with %d identities, want both locations reported", diagnostics, len(identities))
 	}
 }
 

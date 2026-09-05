@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/codellm-devkit/codeanalyzer-iac/internal/ingest"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 	"github.com/google/go-cmp/cmp"
 )
@@ -74,6 +75,32 @@ func TestLoadRejectsIneligibleSourceWithRawArtifactAndDiagnostic(t *testing.T) {
 				t.Fatalf("diagnostics = %#v", got.Diagnostics)
 			}
 		})
+	}
+}
+
+// TestLoadTreatsSourcelessRawArtifactAsNotText covers the row this analyzer
+// writes for a file it could not read as text: no source, the digest of the raw
+// bytes. Reading it back is the same ineligible artifact and the same warning
+// the filesystem inventory reported, not a hash mismatch against our own write.
+func TestLoadTreatsSourcelessRawArtifactAsNotText(t *testing.T) {
+	row := ArtifactRow{ID: artifactID(t, "logo.png"), Path: "logo.png", Format: "binary",
+		Source: "", SHA256: testDigest("\x89PNG\x00"), SizeBytes: 0}
+	queryer := &fakeQueryer{pages: [][]ArtifactRow{{row}, {}}}
+
+	got, err := New(queryer, "payments", 10).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := got.Artifacts[row.Path]
+	if artifact == nil || artifact.Source != "" || artifact.SizeBytes != 0 || artifact.SHA256 != row.SHA256 {
+		t.Fatalf("raw artifact = %#v", artifact)
+	}
+	if hasDiagnostic(got.Diagnostics, "IAC_GRAPH_SOURCE_HASH_MISMATCH", artifact.ID) {
+		t.Fatalf("an artifact this analyzer wrote was reported as a mismatch: %#v", got.Diagnostics)
+	}
+	diagnostic := got.Diagnostics[ingest.SourceNotTextCode+":"+row.Path]
+	if diagnostic == nil || diagnostic.Severity != "warning" || diagnostic.Message != ingest.SourceNotTextMessage {
+		t.Fatalf("diagnostics = %#v, want a warning-severity %s", got.Diagnostics, ingest.SourceNotTextCode)
 	}
 }
 

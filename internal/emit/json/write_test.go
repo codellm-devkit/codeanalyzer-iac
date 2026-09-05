@@ -14,7 +14,7 @@ import (
 )
 
 func TestMarshalIsCompactAndEndsWithOneNewline(t *testing.T) {
-	payload, err := Marshal(model.NewAnalysis(1, fixtureApplication(t)))
+	payload, err := Marshal(model.NewAnalysis(1, fixtureApplication(t), "dev"))
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
@@ -37,13 +37,13 @@ func TestMarshalRejectsAnInvalidModel(t *testing.T) {
 	app := fixtureApplication(t)
 	app.Edges[model.HasArtifact]["dangling"] = model.Edge{Src: app.ID, Dst: "can://artifact/payments/absent.yaml"}
 
-	if _, err := Marshal(model.NewAnalysis(1, app)); err == nil || !strings.Contains(err.Error(), "dangling edge") {
+	if _, err := Marshal(model.NewAnalysis(1, app, "dev")); err == nil || !strings.Contains(err.Error(), "dangling edge") {
 		t.Fatalf("Marshal() error = %v, want the model validation failure", err)
 	}
 }
 
 func TestMarshalRejectsADocumentTheSchemaForbids(t *testing.T) {
-	analysis := model.NewAnalysis(1, fixtureApplication(t))
+	analysis := model.NewAnalysis(1, fixtureApplication(t), "dev")
 	analysis.Language = "helm"
 
 	if _, err := Marshal(analysis); err == nil || !strings.Contains(err.Error(), "schema") {

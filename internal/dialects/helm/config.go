@@ -83,16 +83,6 @@ func BuildProfiles(app *model.Application, configArtifactID string) (model.Delta
 	return delta, nil
 }
 
-// parseConfig returns only the facts declared by the selected configuration
-// artifact, leaving chart default profiles to BuildProfiles.
-func parseConfig(app *model.Application, artifactID string) (model.Delta, error) {
-	delta := model.Delta{}
-	if err := addConfigProfiles(&delta, app, artifactID); err != nil {
-		return model.Delta{}, err
-	}
-	return delta, nil
-}
-
 // defaultProfile returns the one profile every chart is rendered with when no
 // configuration selects it: chart defaults only, no value layers.
 func defaultProfile(chart *model.Artifact) *model.HelmRenderProfile {

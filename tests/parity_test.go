@@ -82,15 +82,7 @@ func TestAnalysisLevelsAreAdditive(t *testing.T) {
 // plus facts a sibling analyzer owns, and the enrichment read back from it must
 // be the identical canonical row set.
 func TestGraphInputParity(t *testing.T) {
-	uri := os.Getenv("NEO4J_TEST_URI")
-	if uri == "" {
-		const message = "set NEO4J_TEST_URI, NEO4J_TEST_USERNAME and NEO4J_TEST_PASSWORD to run the graph parity gate"
-		if os.Getenv("CI") != "" {
-			// A gate that silently skips in CI is not a gate.
-			t.Fatal("the graph parity gate is required in CI: " + message)
-		}
-		t.Skip(message)
-	}
+	uri := requireGraphURI(t)
 	root := fixtureCopy(t, parityFixture)
 	appName := "parity-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	appID := "can://iac/" + appName
@@ -170,6 +162,80 @@ func TestGraphInputParity(t *testing.T) {
 	if diff := cmp.Diff(filesystemScript, analyzeGraph("cypher")); diff != "" {
 		t.Errorf("the two input modes project different Cypher (-filesystem +graph):\n%s", diff)
 	}
+}
+
+// TestBinaryArtifactRoundTripIsDiagnosticEquivalent closes the loop the
+// filesystem inventory opens: an artifact the analyzer could not read as text is
+// written to the graph with no source and the digest of its raw bytes, and
+// reading that row back must report the same ineligible artifact — never a
+// source/digest mismatch against a row the analyzer itself wrote.
+func TestBinaryArtifactRoundTripIsDiagnosticEquivalent(t *testing.T) {
+	uri := requireGraphURI(t)
+	root := fixtureCopy(t, parityFixture)
+	if err := os.WriteFile(filepath.Join(root, "logo.png"), []byte{0x89, 'P', 'N', 'G', 0x00, 0xff, 0xfe}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appName := "roundtrip-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	appID := "can://iac/" + appName
+	configID := "can://artifact/" + appName + "/" + parityConfig
+
+	graph := openParityGraph(t, uri)
+	t.Cleanup(func() { graph.wipe(t, appID) })
+	graph.wipe(t, appID)
+
+	credentials := []string{
+		"--neo4j-user", envOr("NEO4J_TEST_USERNAME", "neo4j"),
+		"--neo4j-password", os.Getenv("NEO4J_TEST_PASSWORD"),
+		"--neo4j-database", os.Getenv("NEO4J_TEST_DATABASE"),
+	}
+	filesystem := analyzeLevelWithConfig(t, root, appName, parityConfig, 1)
+	if _, stderr, err := run(t, root, append([]string{".", "--app-name", appName, "--config", parityConfig,
+		"--emit", "neo4j", "--neo4j-uri", uri}, credentials...)...); err != nil {
+		t.Fatalf("filesystem analysis (--emit neo4j) failed: %v: %s", err, stderr)
+	}
+	graphed, stderr, err := run(t, root, append([]string{uri, "--app-name", appName, "--config", configID,
+		"--emit", "json", "--analysis-level", "1"}, credentials...)...)
+	if err != nil {
+		t.Fatalf("graph analysis failed: %v: %s", err, stderr)
+	}
+
+	want := analysisDiagnostics(t, filesystem)
+	if want["IAC_SOURCE_NOT_TEXT:logo.png"] == nil {
+		t.Fatalf("filesystem diagnostics = %v, want the unreadable binary artifact", want)
+	}
+	if diff := cmp.Diff(want, analysisDiagnostics(t, graphed)); diff != "" {
+		t.Errorf("graph-mode diagnostics differ from filesystem mode (-filesystem +graph):\n%s", diff)
+	}
+}
+
+// requireGraphURI returns the disposable Neo4j every graph gate needs. A gate
+// that silently skips in CI is not a gate.
+func requireGraphURI(t *testing.T) string {
+	t.Helper()
+	uri := os.Getenv("NEO4J_TEST_URI")
+	if uri == "" {
+		const message = "set NEO4J_TEST_URI, NEO4J_TEST_USERNAME and NEO4J_TEST_PASSWORD to run the graph gates"
+		if os.Getenv("CI") != "" {
+			t.Fatal("the graph gates are required in CI: " + message)
+		}
+		t.Skip(message)
+	}
+	return uri
+}
+
+// analysisDiagnostics returns the application diagnostics of one analysis
+// document, keyed exactly as the document keys them.
+func analysisDiagnostics(t *testing.T, payload string) map[string]any {
+	t.Helper()
+	var document struct {
+		Application struct {
+			Diagnostics map[string]any `json:"diagnostics"`
+		} `json:"application"`
+	}
+	if err := json.Unmarshal([]byte(payload), &document); err != nil {
+		t.Fatalf("the analysis document is not valid JSON: %v", err)
+	}
+	return document.Application.Diagnostics
 }
 
 // ---------------------------------------------------------------------------

@@ -97,6 +97,20 @@ func (denyExternalSchemaLoader) Load(location string) (any, error) {
 	return nil, fmt.Errorf("external JSON Schema reference is not allowed: %s", location)
 }
 
+// compileValuesSchema compiles one chart's values.schema.json. It is the only
+// compiler this analyzer builds: its loader refuses every external reference,
+// so no values schema — L1 diagnostic or L3 render input — can make the
+// analyzer open a socket or read a file.
+func compileValuesSchema(document any) (*jsonschema.Schema, error) {
+	compiler := jsonschema.NewCompiler()
+	compiler.UseLoader(denyExternalSchemaLoader{})
+	const resource = "https://codellm-devkit.invalid/helm/values.schema.json"
+	if err := compiler.AddResource(resource, document); err != nil {
+		return nil, err
+	}
+	return compiler.Compile(resource)
+}
+
 func parseChart(ctx context.Context, artifact *model.Artifact, detection dialect.Detection) model.Delta {
 	parsed := parseYAML(ctx, artifact.Source)
 	var metadata chartDocument
@@ -307,14 +321,7 @@ func parseValuesSchema(artifact *model.Artifact, detection dialect.Detection) mo
 	var document any
 	err := json.Unmarshal([]byte(artifact.Source), &document)
 	if err == nil {
-		compiler := jsonschema.NewCompiler()
-		compiler.UseLoader(denyExternalSchemaLoader{})
-		const resource = "https://codellm-devkit.invalid/helm/values.schema.json"
-		if addErr := compiler.AddResource(resource, document); addErr != nil {
-			err = addErr
-		} else {
-			_, err = compiler.Compile(resource)
-		}
+		_, err = compileValuesSchema(document)
 	}
 	facet := &model.HelmValuesSchema{Dialect: dialectName, Kind: "helm_values_schema", Status: status, Roles: normalizedRoles(detection.Roles)}
 	delta := deltaWithFacet(artifact, facet)

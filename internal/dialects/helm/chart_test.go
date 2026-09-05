@@ -369,7 +369,7 @@ func applyAndValidate(t *testing.T, artifact *model.Artifact, delta model.Delta)
 	if err := model.Validate(app); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	analysis := model.NewAnalysis(1, app)
+	analysis := model.NewAnalysis(1, app, "dev")
 	var document any
 	if err := json.Unmarshal([]byte(mustJSON(t, analysis)), &document); err != nil {
 		t.Fatal(err)

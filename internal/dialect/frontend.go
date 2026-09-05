@@ -35,7 +35,6 @@ type Detection struct {
 
 // EvaluationInput supplies the bounded inputs required for L3 evaluation.
 type EvaluationInput struct {
-	Artifacts        map[string]*model.Artifact
 	ConfigArtifactID string
 	Jobs             int
 	TempRoot         string

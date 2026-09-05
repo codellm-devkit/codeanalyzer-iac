@@ -198,6 +198,20 @@ func TestVersionIsReportedOnStdout(t *testing.T) {
 	if stderr != "" {
 		t.Errorf("stderr = %q, want nothing", stderr)
 	}
+
+	// The binary reports one version: what --version prints is what the
+	// analysis document is stamped with.
+	reported := strings.TrimSpace(strings.TrimPrefix(stdout, "caniac version "))
+	analysis, stderr, err := run(t, repositoryRoot(),
+		"testdata/helm/l1-v2", "--app-name", "payments", "--analysis-level", "1")
+	if err != nil {
+		t.Fatalf("analysis failed: %v: %s", err, stderr)
+	}
+	document := decodeAnalysis(t, analysis)
+	if document.Analyzer.Name != "codeanalyzer-iac" || document.Analyzer.Version != reported {
+		t.Errorf("analyzer = %q/%q, want codeanalyzer-iac/%s",
+			document.Analyzer.Name, document.Analyzer.Version, reported)
+	}
 }
 
 // TestStrictFailsAfterWritingTheInspectableOutput is the strict exit channel:
@@ -226,6 +240,32 @@ func TestStrictFailsAfterWritingTheInspectableOutput(t *testing.T) {
 	}
 	if relaxed != stdout {
 		t.Error("--strict changed the analysis document as well as the exit status")
+	}
+}
+
+// TestBinaryArtifactIsNotAStrictFailure holds the spec rule that an artifact the
+// analyzer cannot read as text stays raw rather than becoming an error: a
+// repository with a binary file in it still passes --strict.
+func TestBinaryArtifactIsNotAStrictFailure(t *testing.T) {
+	root := fixtureCopy(t, "profiles")
+	// Invalid UTF-8, so the inventory keeps the digest and no source.
+	if err := os.WriteFile(filepath.Join(root, "logo.png"), []byte{0x89, 'P', 'N', 'G', 0x00, 0xff, 0xfe}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := run(t, root, ".", "--app-name", "payments", "--analysis-level", "3", "--strict")
+	if err != nil {
+		t.Fatalf("--strict failed on a binary artifact: %v: %s", err, stderr)
+	}
+	document := decodeAnalysis(t, stdout)
+	if artifact, ok := document.Application.Artifacts["logo.png"]; !ok {
+		t.Fatal("the binary artifact was not inventoried")
+	} else if artifact.Source != "" || artifact.SizeBytes != 0 || artifact.SHA256 == "" {
+		t.Errorf("binary artifact = %#v, want no source, no size and a digest", artifact)
+	}
+	if !strings.Contains(stdout, `"code":"IAC_SOURCE_NOT_TEXT","severity":"warning"`) &&
+		!strings.Contains(stdout, `"severity":"warning","code":"IAC_SOURCE_NOT_TEXT"`) {
+		t.Error("the binary artifact did not produce a warning-severity IAC_SOURCE_NOT_TEXT diagnostic")
 	}
 }
 
@@ -263,7 +303,11 @@ type analysisDocument struct {
 	SchemaVersion string `json:"schema_version"`
 	Language      string `json:"language"`
 	MaxLevel      int    `json:"max_level"`
-	Application   struct {
+	Analyzer      struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"analyzer"`
+	Application struct {
 		ID        string `json:"id"`
 		Artifacts map[string]struct {
 			ID        string `json:"id"`

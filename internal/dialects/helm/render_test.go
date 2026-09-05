@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/dialect"
@@ -506,7 +508,7 @@ func TestRenderSecretDataNeverLeavesTheRenderer(t *testing.T) {
 	}
 
 	deltaJSON := mustJSON(t, jsonDocument(t, delta))
-	analysisJSON := mustJSON(t, model.NewAnalysis(3, app))
+	analysisJSON := mustJSON(t, model.NewAnalysis(3, app, "dev"))
 	templateSource := artifacts["templates/secret.yaml"].Source
 	for _, secret := range []string{dataPlaintext, dataEncoded, stringPlaintext} {
 		if strings.Contains(deltaJSON, secret) {
@@ -893,8 +895,10 @@ func TestRenderDiagnosticsOmitTheRenderDirectory(t *testing.T) {
 	if strings.Contains(message, root) {
 		t.Errorf("diagnostic message embeds the ephemeral render directory: %q", message)
 	}
-	if !strings.Contains(message, "<render>") {
-		t.Errorf("diagnostic message = %q, want the render directory replaced", message)
+	// The message is the analyzer's own account of the phase; no SDK text, and
+	// so no path from inside the render directory, can reach it.
+	if want := "render profile default could not be rendered: the chart could not be loaded by the renderer"; message != want {
+		t.Errorf("diagnostic message = %q, want %q", message, want)
 	}
 }
 
@@ -963,7 +967,7 @@ func TestEvaluateRendersEveryDeclaredProfile(t *testing.T) {
 
 	want := ""
 	for _, jobs := range []int{1, 4} {
-		input := dialect.EvaluationInput{Artifacts: app.Artifacts, ConfigArtifactID: config.ID, Jobs: jobs, TempRoot: t.TempDir()}
+		input := dialect.EvaluationInput{ConfigArtifactID: config.ID, Jobs: jobs, TempRoot: t.TempDir()}
 		delta, err := New().Evaluate(t.Context(), app, input)
 		if err != nil {
 			t.Fatalf("Evaluate() error = %v", err)
@@ -1029,5 +1033,107 @@ func TestEvaluateIsolatesAnUnrenderableProfile(t *testing.T) {
 	}
 	if !strings.Contains(found, profile.Name) {
 		t.Errorf("diagnostic message = %q, want the profile it belongs to", found)
+	}
+}
+
+// TestRenderValuesSchemaNeverReachesTheNetworkOrFilesystem is the render-path
+// half of the schema-egress rule the L1 compiler already keeps: a chart's
+// values.schema.json must not be able to make the analyzer dial a host or read
+// a file, and the refusal must not name what it refused.
+func TestRenderValuesSchemaNeverReachesTheNetworkOrFilesystem(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	var dialed atomic.Bool
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			dialed.Store(true)
+			connection.Close()
+		}
+	}()
+
+	// A schema that would validate the chart's values, so resolving the
+	// reference is the only way this render can succeed.
+	reachable := filepath.Join(t.TempDir(), "reachable.schema.json")
+	if err := os.WriteFile(reachable, []byte(`{"type":"object"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name string
+		ref  string
+	}{
+		{name: "http", ref: "http://" + listener.Addr().String() + "/values.schema.json"},
+		{name: "file", ref: "file://" + filepath.ToSlash(reachable)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, artifacts := inlineApplication(t, map[string]string{
+				"Chart.yaml":            "apiVersion: v2\nname: egress\nversion: 0.1.0\n",
+				"values.yaml":           "replicas: 1\n",
+				"values.schema.json":    `{"$ref": "` + test.ref + `"}`,
+				"templates/config.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}\n",
+			})
+			applyProfiles(t, app, "")
+			chart := artifacts["Chart.yaml"]
+			profile := profileNamed(t, app, chart, "default")
+			delta, err := renderProfile(t.Context(), app, chart.IaC.(*model.HelmChart), profile, t.TempDir())
+			if err != nil {
+				t.Fatalf("renderProfile() error = %v, want a failed render fact", err)
+			}
+			render := renderFromDelta(t, delta, chart.ID)
+			if render.Status != "failed" || render.Phase != "values" {
+				t.Fatalf("render status/phase = %q/%q, want failed/values", render.Status, render.Phase)
+			}
+			id := assertRenderDiagnostic(t, render, helmRenderValuesCode, "values")
+			message := render.Diagnostics[id].Message
+			if strings.Contains(message, test.ref) || strings.Contains(message, reachable) ||
+				strings.Contains(message, listener.Addr().String()) {
+				t.Errorf("diagnostic message = %q, want no reference to the refused target", message)
+			}
+		})
+	}
+	if dialed.Load() {
+		t.Error("rendering opened a connection to the schema reference host")
+	}
+}
+
+// TestRenderDiagnosticsNeverEchoValues holds the absolute claim README makes
+// about render-derived output: a values-phase failure reports the phase and the
+// profile, never the value that failed it.
+func TestRenderDiagnosticsNeverEchoValues(t *testing.T) {
+	const secret = "canary-token-3f9a2b"
+	app, artifacts := inlineApplication(t, map[string]string{
+		"Chart.yaml":            "apiVersion: v2\nname: echo\nversion: 0.1.0\n",
+		"values.yaml":           "token: " + secret + "\n",
+		"values.schema.json":    `{"type":"object","properties":{"token":{"pattern":"^[0-9]+$"}}}`,
+		"templates/config.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}\n",
+	})
+	applyProfiles(t, app, "")
+	chart := artifacts["Chart.yaml"]
+	profile := profileNamed(t, app, chart, "default")
+	delta, err := renderProfile(t.Context(), app, chart.IaC.(*model.HelmChart), profile, t.TempDir())
+	if err != nil {
+		t.Fatalf("renderProfile() error = %v, want a failed render fact", err)
+	}
+	render := renderFromDelta(t, delta, chart.ID)
+	if render.Status != "failed" || render.Phase != "values" {
+		t.Fatalf("render status/phase = %q/%q, want failed/values", render.Status, render.Phase)
+	}
+	id := assertRenderDiagnostic(t, render, helmRenderValuesCode, "values")
+	if message := render.Diagnostics[id].Message; !strings.Contains(message, profile.Name) {
+		t.Errorf("diagnostic message = %q, want the profile it belongs to", message)
+	}
+	encoded, err := json.Marshal(render)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Errorf("render facts echoed the failing value: %s", encoded)
 	}
 }

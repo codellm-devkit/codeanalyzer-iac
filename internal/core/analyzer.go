@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"sort"
 	"strings"
 
@@ -45,6 +46,7 @@ type Analyzer struct {
 	opts     options.Options
 	source   ingest.Source
 	registry *dialect.Registry
+	version  string
 }
 
 // keyedDelta is one worker's result under the source identity it was derived
@@ -54,8 +56,10 @@ type keyedDelta struct {
 	Delta model.Delta
 }
 
-func New(opts options.Options, source ingest.Source, registry *dialect.Registry) *Analyzer {
-	return &Analyzer{opts: opts, source: source, registry: registry}
+// New builds an analyzer. version is the binary's own version, stamped into
+// every document it publishes.
+func New(opts options.Options, source ingest.Source, registry *dialect.Registry, version string) *Analyzer {
+	return &Analyzer{opts: opts, source: source, registry: registry, version: version}
 }
 
 // Analyze runs load, detect, parse, resolve, profile and evaluate in order,
@@ -122,7 +126,7 @@ func (a *Analyzer) Analyze(ctx context.Context) (*model.Analysis, error) {
 	if err := model.Validate(app); err != nil {
 		return nil, err
 	}
-	return model.NewAnalysis(a.opts.AnalysisLevel, app), analysisError(app, a.opts.Strict)
+	return model.NewAnalysis(a.opts.AnalysisLevel, app, a.version), analysisError(app, a.opts.Strict)
 }
 
 // parseArtifacts parses every detected artifact concurrently. A parser failure
@@ -167,9 +171,11 @@ func (a *Analyzer) parseArtifacts(ctx context.Context, app *model.Application, d
 // frontend name.
 func (a *Analyzer) evaluateProfiles(ctx context.Context, app *model.Application, configArtifactID string) []keyedDelta {
 	input := dialect.EvaluationInput{
-		Artifacts:        app.Artifacts,
 		ConfigArtifactID: configArtifactID,
 		Jobs:             a.workers(),
+		// Renders materialize charts under the process temporary directory; it
+		// is named here rather than left to os.MkdirTemp's own default.
+		TempRoot: os.TempDir(),
 	}
 	results := make([]keyedDelta, 0, len(a.registry.Frontends()))
 	for _, frontend := range a.registry.Frontends() {

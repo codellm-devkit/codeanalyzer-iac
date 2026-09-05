@@ -205,7 +205,7 @@ func TestConfigProfilesAreConfigContainedWithOrderedLayers(t *testing.T) {
 		t.Errorf("minimal capabilities = %q/%#v, want the renderer's pinned defaults", minimal.KubeVersion, minimal.APIVersions)
 	}
 
-	document := mustJSON(t, model.NewAnalysis(3, app))
+	document := mustJSON(t, model.NewAnalysis(3, app, "dev"))
 	if got := strings.Count(document, "3.4.5"); got != 1 {
 		t.Errorf("literal set value appears %d times in the model, want only in the config artifact source", got)
 	}
@@ -220,12 +220,12 @@ func TestConfigSelectorsAcceptCanonicalArtifactIDs(t *testing.T) {
 	values := artifacts["values.yaml"]
 	config := replaceConfigSource(t, app, artifacts, "version: 1\nrenders:\n  - name: byid\n    chart: "+chart.ID+"\n    values:\n      - "+values.ID+"\n")
 
-	delta, err := parseConfig(app, config.ID)
+	delta, err := BuildProfiles(app, config.ID)
 	if err != nil {
-		t.Fatalf("parseConfig() error = %v", err)
+		t.Fatalf("BuildProfiles() error = %v", err)
 	}
 	if err := model.Apply(app, delta); err != nil {
-		t.Fatalf("Apply(parseConfig()) error = %v", err)
+		t.Fatalf("Apply(BuildProfiles()) error = %v", err)
 	}
 	assertProfileApplication(t, app)
 	profile := config.CodeAnalyzerIaCConfig.RenderProfiles["byid"]
@@ -366,7 +366,7 @@ func assertProfileApplication(t *testing.T, app *model.Application) {
 	if err := model.Validate(app); err != nil {
 		t.Fatalf("profile Validate() error = %v", err)
 	}
-	analysis := model.NewAnalysis(3, app)
+	analysis := model.NewAnalysis(3, app, "dev")
 	if err := helmAnalysisSchema(t).Validate(jsonDocument(t, analysis)); err != nil {
 		t.Fatalf("L3 schema validation error = %v\n%s", err, mustJSON(t, analysis))
 	}

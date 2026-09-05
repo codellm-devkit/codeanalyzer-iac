@@ -25,6 +25,24 @@ import (
 
 const fixtureApp = "fixture"
 
+// testVersion is deliberately not the binary's default: a document stamped with
+// it can only have been given it by the caller.
+const testVersion = "9.9.9-test"
+
+// TestAnalysisIsStampedWithTheBuildVersion holds the one-version rule: the
+// document reports the version the binary was built with, not a constant the
+// model carries.
+func TestAnalysisIsStampedWithTheBuildVersion(t *testing.T) {
+	source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n"}, &recorder{})
+	analysis, err := New(options.Options{AppName: fixtureApp, AnalysisLevel: 1}, source, dialect.NewRegistry(helm.New()), testVersion).Analyze(t.Context())
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	if analysis.Analyzer.Name != "codeanalyzer-iac" || analysis.Analyzer.Version != testVersion {
+		t.Errorf("analyzer = %q/%q, want codeanalyzer-iac/%s", analysis.Analyzer.Name, analysis.Analyzer.Version, testVersion)
+	}
+}
+
 func TestAnalyzeRunsPhasesInOrder(t *testing.T) {
 	events := &recorder{}
 	source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n", "b.yaml": "b: 2\n"}, events)
@@ -215,7 +233,7 @@ func TestAnalysisLevelsAreSubsets(t *testing.T) {
 
 func analyzer(t *testing.T, opts options.Options, source ingest.Source, frontends ...dialect.Frontend) *Analyzer {
 	t.Helper()
-	return New(opts, source, dialect.NewRegistry(frontends...))
+	return New(opts, source, dialect.NewRegistry(frontends...), testVersion)
 }
 
 func analyzeFixture(t *testing.T, fixture string, level, jobs int) *model.Analysis {
@@ -225,7 +243,7 @@ func analyzeFixture(t *testing.T, fixture string, level, jobs int) *model.Analys
 		t.Fatal(err)
 	}
 	opts := options.Options{AppName: fixtureApp, AnalysisLevel: level, Jobs: jobs}
-	analysis, err := New(opts, source, dialect.NewRegistry(helm.New())).Analyze(t.Context())
+	analysis, err := New(opts, source, dialect.NewRegistry(helm.New()), testVersion).Analyze(t.Context())
 	if err != nil {
 		t.Fatalf("Analyze() error = %v", err)
 	}
@@ -394,7 +412,7 @@ func analyzeConfiguredFixture(t *testing.T, fixture, config string, level int) *
 		t.Fatal(err)
 	}
 	opts := options.Options{AppName: fixtureApp, AnalysisLevel: level, Jobs: 2, Config: config}
-	analysis, err := New(opts, source, dialect.NewRegistry(helm.New())).Analyze(t.Context())
+	analysis, err := New(opts, source, dialect.NewRegistry(helm.New()), testVersion).Analyze(t.Context())
 	if err != nil {
 		t.Fatalf("Analyze() error = %v", err)
 	}

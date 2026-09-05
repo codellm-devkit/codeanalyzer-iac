@@ -1,4 +1,11 @@
-.PHONY: sync-schema test race vet schema-check fuzz-smoke test-live test-live-head
+.PHONY: build sync-schema test race vet schema-check fuzz-smoke test-live test-live-head
+
+# VERSION is the one version the binary reports: --version prints it and every
+# analysis document is stamped with it. Override it for a release build.
+VERSION ?= 0.1.0-dev
+
+build:
+	go build -ldflags "-X main.version=$(VERSION)" -o caniac ./cmd/codeanalyzer-iac
 
 sync-schema:
 	cp schema.json internal/contract/schema.json

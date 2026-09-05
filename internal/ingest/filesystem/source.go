@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -150,7 +151,9 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 			// The accepted contract defines size_bytes as the UTF-8 byte length
 			// of source. Retaining raw bytes would violate it, so the raw digest
 			// is preserved while source and size_bytes remain empty/zero.
-			s.addDiagnostic(result.Diagnostics, "IAC_SOURCE_NOT_TEXT", rel, "source artifact is not valid UTF-8 text", artifactID)
+			// Spec: an artifact the analyzer cannot read as text remains raw and
+			// is not an error, so --strict still passes on a real repository.
+			s.addDiagnostic(result.Diagnostics, ingest.SourceNotTextCode, rel, ingest.SourceNotTextMessage, artifactID).Severity = "warning"
 		}
 		result.Artifacts[rel] = artifact
 	}
@@ -160,13 +163,12 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 func (s *Source) collect(ctx context.Context, selection string, candidates map[string]struct{}, diagnostics map[string]*model.Diagnostic) error {
 	info, err := os.Stat(selection)
 	if err != nil {
-		rel := s.relativeOrEmpty(selection)
-		s.addDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", rel, "cannot inspect source selection: "+err.Error(), "")
+		s.addPathDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", selection, "cannot inspect source selection: "+err.Error())
 		return nil
 	}
 	if !info.IsDir() {
 		if !info.Mode().IsRegular() {
-			s.addDiagnostic(diagnostics, "IAC_SOURCE_NOT_REGULAR", s.relativeOrEmpty(selection), "source selection is not a regular file", "")
+			s.addPathDiagnostic(diagnostics, "IAC_SOURCE_NOT_REGULAR", selection, "source selection is not a regular file")
 			return nil
 		}
 		s.addCandidate(selection, candidates, diagnostics)
@@ -177,8 +179,7 @@ func (s *Source) collect(ctx context.Context, selection string, candidates map[s
 			return err
 		}
 		if walkErr != nil {
-			rel := s.relativeOrEmpty(path)
-			s.addDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", rel, "cannot inspect source artifact: "+walkErr.Error(), "")
+			s.addPathDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", path, "cannot inspect source artifact: "+walkErr.Error())
 			return nil
 		}
 		if entry.IsDir() {
@@ -190,16 +191,16 @@ func (s *Source) collect(ctx context.Context, selection string, candidates map[s
 		if entry.Type()&os.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(path)
 			if err != nil {
-				s.addDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", s.relativeOrEmpty(path), "cannot resolve source symlink: "+err.Error(), "")
+				s.addPathDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", path, "cannot resolve source symlink: "+err.Error())
 				return nil
 			}
 			if !withinRoot(s.root, resolved) {
-				s.addDiagnostic(diagnostics, "IAC_SOURCE_OUTSIDE_WORKSPACE", s.relativeOrEmpty(path), "source symlink resolves outside workspace", "")
+				s.addPathDiagnostic(diagnostics, "IAC_SOURCE_OUTSIDE_WORKSPACE", path, "source symlink resolves outside workspace")
 				return nil
 			}
 			resolvedInfo, err := os.Stat(resolved)
 			if err != nil {
-				s.addDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", s.relativeOrEmpty(path), "cannot inspect source symlink target: "+err.Error(), "")
+				s.addPathDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", path, "cannot inspect source symlink target: "+err.Error())
 				return nil
 			}
 			if resolvedInfo.IsDir() || !resolvedInfo.Mode().IsRegular() {
@@ -210,7 +211,7 @@ func (s *Source) collect(ctx context.Context, selection string, candidates map[s
 		}
 		info, err := entry.Info()
 		if err != nil {
-			s.addDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", s.relativeOrEmpty(path), "cannot inspect source artifact: "+err.Error(), "")
+			s.addPathDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", path, "cannot inspect source artifact: "+err.Error())
 			return nil
 		}
 		if info.Mode().IsRegular() {
@@ -223,25 +224,25 @@ func (s *Source) collect(ctx context.Context, selection string, candidates map[s
 func (s *Source) addCandidate(path string, candidates map[string]struct{}, diagnostics map[string]*model.Diagnostic) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		s.addDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", s.relativeOrEmpty(path), "cannot resolve source artifact: "+err.Error(), "")
+		s.addPathDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", path, "cannot resolve source artifact: "+err.Error())
 		return
 	}
 	if !withinRoot(s.root, resolved) {
-		s.addDiagnostic(diagnostics, "IAC_SOURCE_OUTSIDE_WORKSPACE", s.relativeOrEmpty(path), "source artifact resolves outside workspace", "")
+		s.addPathDiagnostic(diagnostics, "IAC_SOURCE_OUTSIDE_WORKSPACE", path, "source artifact resolves outside workspace")
 		return
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
-		s.addDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", s.relativeOrEmpty(path), "cannot inspect source artifact: "+err.Error(), "")
+		s.addPathDiagnostic(diagnostics, "IAC_SOURCE_UNREADABLE", path, "cannot inspect source artifact: "+err.Error())
 		return
 	}
 	if !info.Mode().IsRegular() {
-		s.addDiagnostic(diagnostics, "IAC_SOURCE_NOT_REGULAR", s.relativeOrEmpty(path), "source artifact is not a regular file", "")
+		s.addPathDiagnostic(diagnostics, "IAC_SOURCE_NOT_REGULAR", path, "source artifact is not a regular file")
 		return
 	}
 	rel, err := relativePath(s.root, resolved)
 	if err != nil {
-		s.addDiagnostic(diagnostics, "IAC_SOURCE_OUTSIDE_WORKSPACE", s.relativeOrEmpty(path), "source artifact is outside workspace", "")
+		s.addPathDiagnostic(diagnostics, "IAC_SOURCE_OUTSIDE_WORKSPACE", path, "source artifact is outside workspace")
 		return
 	}
 	if isVCSAdministrationPath(rel) {
@@ -266,9 +267,23 @@ func readRegular(root rootHandle, rel string) ([]byte, error) {
 	return io.ReadAll(file)
 }
 
-func (s *Source) addDiagnostic(diagnostics map[string]*model.Diagnostic, code, rel, message, artifactID string) {
-	key := code + ":" + rel
-	diagnostics[key] = &model.Diagnostic{
+// addPathDiagnostic reports a diagnostic about an absolute filesystem location.
+// A location outside the workspace has no relative path, so the percent-encoded
+// location discriminates it instead: without that, two unreadable out-of-
+// workspace selections would share one key and one identity, and only the last
+// of them would be reported.
+func (s *Source) addPathDiagnostic(diagnostics map[string]*model.Diagnostic, code, location, message string) *model.Diagnostic {
+	discriminator := s.relativeOrEmpty(location)
+	if discriminator == "" {
+		discriminator = url.PathEscape(location)
+	}
+	return s.addDiagnostic(diagnostics, code, discriminator, message, "")
+}
+
+// addDiagnostic reports one diagnostic under the workspace-relative path it
+// belongs to, which is both its key and the last segment of its identity.
+func (s *Source) addDiagnostic(diagnostics map[string]*model.Diagnostic, code, rel, message, artifactID string) *model.Diagnostic {
+	diagnostic := &model.Diagnostic{
 		ID:         model.SemanticID(s.appName, "ingest", "diagnostic", code, rel),
 		Kind:       "diagnostic",
 		Severity:   "error",
@@ -276,6 +291,8 @@ func (s *Source) addDiagnostic(diagnostics map[string]*model.Diagnostic, code, r
 		Message:    message,
 		ArtifactID: artifactID,
 	}
+	diagnostics[code+":"+rel] = diagnostic
+	return diagnostic
 }
 
 func (s *Source) relativeOrEmpty(path string) string {

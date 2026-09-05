@@ -153,14 +153,21 @@ func NewApplication(appName string, artifacts map[string]*Artifact) *Application
 	return app
 }
 
-// NewAnalysis panics for a level outside the closed schema range. The constructor's
-// established pointer-only signature has no error return, so this rejects invalid
-// direct callers at the model boundary instead of constructing invalid output.
-func NewAnalysis(level int, app *Application) *Analysis {
+// NewAnalysis panics for a level outside the closed schema range, and for an
+// empty version: both would produce a document the accepted schema rejects. The
+// constructor's established pointer-only signature has no error return, so this
+// rejects invalid direct callers at the model boundary instead.
+//
+// version is the one version the binary reports; it is stamped at build time and
+// threaded from main, never defaulted here.
+func NewAnalysis(level int, app *Application, version string) *Analysis {
 	if level < 1 || level > 3 {
 		panic(fmt.Sprintf("analysis level must be between 1 and 3: %d", level))
 	}
-	return &Analysis{SchemaVersion: "2.0.0", Language: "iac", MaxLevel: level, Analyzer: Analyzer{Name: "codeanalyzer-iac", Version: "dev"}, Application: app}
+	if version == "" {
+		panic("analyzer version must not be empty")
+	}
+	return &Analysis{SchemaVersion: "2.0.0", Language: "iac", MaxLevel: level, Analyzer: Analyzer{Name: "codeanalyzer-iac", Version: version}, Application: app}
 }
 
 func newEdgeMaps() map[Relationship]map[string]Edge {

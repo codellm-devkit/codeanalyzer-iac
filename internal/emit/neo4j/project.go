@@ -114,8 +114,16 @@ func (p *projector) application(app *model.Application) {
 	for _, id := range sortedKeys(app.Diagnostics) {
 		p.diagnostic(app.Diagnostics[id])
 	}
-	for relationship, edges := range app.Edges {
-		name := strings.ToUpper(string(relationship))
+	// Relationship order is fixed so a projection failure is reported at the
+	// same edge whatever the map's iteration order happened to be.
+	relationships := make([]string, 0, len(app.Edges))
+	for relationship := range app.Edges {
+		relationships = append(relationships, string(relationship))
+	}
+	sort.Strings(relationships)
+	for _, relationship := range relationships {
+		name := strings.ToUpper(relationship)
+		edges := app.Edges[model.Relationship(relationship)]
 		for _, key := range sortedKeys(edges) {
 			edge := edges[key]
 			p.builder.edge(name, edge.Src, edge.Dst)

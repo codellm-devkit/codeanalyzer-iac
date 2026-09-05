@@ -1288,7 +1288,7 @@ func assertResolvedApplication(t *testing.T, app *model.Application) {
 	if err := model.Validate(app); err != nil {
 		t.Fatalf("resolved Validate() error = %v", err)
 	}
-	analysis := model.NewAnalysis(2, app)
+	analysis := model.NewAnalysis(2, app, "dev")
 	if err := helmAnalysisSchema(t).Validate(jsonDocument(t, analysis)); err != nil {
 		t.Fatalf("L2 schema validation error = %v\n%s", err, mustJSON(t, analysis))
 	}

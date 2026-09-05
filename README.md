@@ -15,9 +15,17 @@ contract update.
 ## Install and build
 
 ```sh
-go build -o caniac ./cmd/codeanalyzer-iac    # or: go install ./cmd/codeanalyzer-iac
+make build                 # -o caniac, version stamped from VERSION (0.1.0-dev)
+make build VERSION=0.1.0   # a release build
 ./caniac --version
 ```
+
+`make build` is the only build that stamps a version: it passes
+`-ldflags "-X main.version=$(VERSION)"`, and that one string is both what
+`--version` prints and what `analyzer.version` carries in every analysis
+document. A plain `go build -o caniac ./cmd/codeanalyzer-iac` (or
+`go install ./cmd/codeanalyzer-iac`) works and reports the built-in
+`0.1.0-dev`.
 
 The command calls itself `caniac` in its own usage; `go install` produces a
 binary named `codeanalyzer-iac`, and the two behave identically. Building needs
@@ -171,7 +179,10 @@ profiles.
 | `neo4j` (graph-mode default) | a reconciled generation over Bolt | nothing | nothing |
 | `schema` | the embedded graph catalog | `schema.neo4j.json` | `schema.neo4j.json` |
 
-`--emit schema` takes no input path. `-f/--format` accepts only `json`;
+`--emit cypher` in filesystem mode never consults the target graph: the script
+is projected from the analysis alone, so unlike `--emit neo4j` it has no
+hash-conflict guard against facts already in the graph. `--emit schema` takes no
+input path. `-f/--format` accepts only `json`;
 `msgpack` is named so it can be rejected with a clear message rather than
 mis-parsed. `-j/--jobs` bounds parallel parsing and rendering and defaults to
 the CPU count; the output is byte-identical whatever it is set to.
@@ -182,7 +193,9 @@ are discarded rather than allowed onto either stream.
 
 - Exit 0: the analysis completed. Isolated failures — an unparsable file, a
   chart that could not render — are diagnostics inside the model, not process
-  failures.
+  failures. A file the analyzer cannot read as text stays a raw inventory entry
+  (digest, no source) and reports `IAC_SOURCE_NOT_TEXT` at `warning` severity in
+  both input modes, so a repository with binaries in it still passes `--strict`.
 - Exit 1: an analyzer-wide failure, or `--strict` with at least one
   error-severity diagnostic. Whether a document is published first depends on
   how far the run got:
@@ -277,8 +290,9 @@ RETURN res.resource_kind, res.name, res.plural, src.id
 - **No escape from the render directory.** A chart is reconstructed into a
   private temporary directory per profile, every member path is checked against
   traversal before it is written, and the directory is removed when the profile
-  finishes. Render diagnostics have that path replaced by `<render>`, so they
-  stay deterministic and reveal nothing about the machine.
+  finishes. Render diagnostics never carry the renderer's own error text: they
+  report the phase, the profile and the chart, so they reveal neither the
+  machine nor the document that failed.
 
 ### Secret-derived data
 
@@ -302,7 +316,7 @@ Cypher, logs — reproduces it.
 | `Chart.yaml`, `apiVersion: v2` | `helm_chart` | `dependencies:` in the chart, `Chart.lock` for the lock; `type: application` and `type: library` |
 | `values.yaml` | `helm_values`, role `default` | every key becomes a `ConfigKey` with a source span |
 | any file listed in `--config` `values:` | `helm_values`, role `override` | wherever it lives in the chart |
-| `values.schema.json` | `helm_values_schema` | compiled locally; an external `$ref` is refused, not fetched |
+| `values.schema.json` | `helm_values_schema` | compiled locally at L1 and enforced against the coalesced values at L3; an external `$ref` is refused, not fetched, in both |
 | `.helmignore` | `helm_ignore` | classified only: the accepted `HelmIgnore` facet has no pattern field, so the rules are parsed but not published and do not filter the inventory |
 | `crds/**` | `helm_crd` | name/group/kind/plural are read from the document; no CRD validation |
 | `templates/**` | `helm_template`, role `resource` | Go-template definitions, calls (`include`/`template`/`tpl`), `.Values` references and `lookup` calls |
@@ -401,6 +415,7 @@ releases fragile for no gain the worker model does not already provide.
 ## Development gates
 
 ```sh
+make build         # the version-stamped binary
 make vet           # go vet, including the live-tagged package
 make test          # go test ./... — offline, no cluster, no database required
 make race          # go test -race ./...

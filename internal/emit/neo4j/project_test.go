@@ -629,7 +629,7 @@ func fullFixtureAnalysis() *model.Analysis {
 	if err := model.Validate(app); err != nil {
 		panic("fixture is not a valid model: " + err.Error())
 	}
-	return model.NewAnalysis(3, app)
+	return model.NewAnalysis(3, app, "dev")
 }
 
 func fixtureArtifact(path, format, source string) *model.Artifact {

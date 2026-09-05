@@ -1,6 +1,7 @@
 package helm
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,6 +20,8 @@ import (
 	"helm.sh/helm/v4/pkg/chart/loader"
 	"helm.sh/helm/v4/pkg/engine"
 	"helm.sh/helm/v4/pkg/strvals"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"golang.org/x/sync/errgroup"
 
@@ -52,7 +55,6 @@ type renderRun struct {
 	members       map[string]*model.Artifact
 	origins       map[string][]*model.HelmResourceTemplate
 	layerIDs      []string
-	directory     string
 	identity      string
 	inputHash     string
 	digest        string
@@ -97,36 +99,35 @@ func renderProfile(ctx context.Context, app *model.Application, chart *model.Hel
 		return model.Delta{}, fmt.Errorf("create render directory: %w", err)
 	}
 	defer os.RemoveAll(directory)
-	run.directory = directory
 
 	if err := materializeChart(ctx, directory, run.members); err != nil {
-		return run.failedRender(ctx, "load", helmRenderLoadCode, err)
+		return run.failedRender(ctx, "load", helmRenderLoadCode, "the chart members could not be written to the render directory")
 	}
 	loaded, err := loader.Load(directory)
 	if err != nil {
-		return run.failedRender(ctx, "load", helmRenderLoadCode, err)
+		return run.failedRender(ctx, "load", helmRenderLoadCode, "the chart could not be loaded by the renderer")
 	}
 	accessor, err := chartapi.NewAccessor(loaded)
 	if err != nil {
-		return run.failedRender(ctx, "load", helmRenderLoadCode, err)
+		return run.failedRender(ctx, "load", helmRenderLoadCode, "the loaded chart has no readable metadata")
 	}
 	apiVersion, _ := accessor.MetadataAsMap()["APIVersion"].(string)
 	if apiVersion != "v1" && apiVersion != "v2" {
-		return run.failedRender(ctx, "load", helmRenderLoadCode, fmt.Errorf("unsupported chart apiVersion %q; expected v1 or v2", apiVersion))
+		return run.failedRender(ctx, "load", helmRenderLoadCode, "the chart apiVersion is neither v1 nor v2")
 	}
 	if err := checkVendoredDependencies(accessor); err != nil {
-		return run.failedRender(ctx, "dependency", helmRenderDependencyCode, err)
+		return run.failedRender(ctx, "dependency", helmRenderDependencyCode, err.Error())
 	}
 
 	merged, err := mergeProfileValues(ctx, app, profile)
 	if err != nil {
-		return run.failedRender(ctx, "values", helmRenderValuesCode, err)
+		return run.failedRender(ctx, "values", helmRenderValuesCode, "the profile value layers could not be merged")
 	}
 	capabilities := common.DefaultCapabilities.Copy()
 	if profile.KubeVersion != "" {
 		kubeVersion, err := common.ParseKubeVersion(profile.KubeVersion)
 		if err != nil {
-			return run.failedRender(ctx, "values", helmRenderKubeVersionCode, err)
+			return run.failedRender(ctx, "values", helmRenderKubeVersionCode, "the profile kubeVersion is not a Kubernetes version")
 		}
 		capabilities.KubeVersion = *kubeVersion
 	}
@@ -135,21 +136,32 @@ func renderProfile(ctx context.Context, app *model.Application, chart *model.Hel
 	// conflict writes the conflicting value to the standard logger. Discarding
 	// that logger is process-wide policy and belongs to the analyzer entry point
 	// (Task 11), not to a library function that runs in parallel workers.
-	renderValues, err := chartutil.ToRenderValues(loaded, merged, common.ReleaseOptions{
+	// Helm's own values-schema validation is skipped: its compiler carries http,
+	// https and file loaders, so a chart's values.schema.json could make this
+	// render fetch a URL or read a local file. The same check runs below on the
+	// analyzer's compiler, which refuses every external reference.
+	renderValues, err := chartutil.ToRenderValuesWithSchemaValidation(loaded, merged, common.ReleaseOptions{
 		Name:      profile.ReleaseName,
 		Namespace: profile.Namespace,
 		Revision:  1,
 		IsInstall: true,
-	}, capabilities)
+	}, capabilities, true)
 	if err != nil {
-		return run.failedRender(ctx, "values", helmRenderValuesCode, err)
+		return run.failedRender(ctx, "values", helmRenderValuesCode, "the profile values could not be coalesced")
+	}
+	coalesced, ok := renderValues["Values"].(common.Values)
+	if !ok {
+		return run.failedRender(ctx, "values", helmRenderValuesCode, "the coalesced values are not a value tree")
+	}
+	if err := validateRenderValues(loaded, coalesced.AsMap()); err != nil {
+		return run.failedRender(ctx, "values", helmRenderValuesCode, "the coalesced values do not satisfy the chart values schema")
 	}
 	// The coalesced value tree, chart defaults included, identifies the render
 	// inputs; it is hashed here and then discarded with the render directory.
 	effectiveValuesHash := canonicalSHA256(renderValues["Values"])
 	rendered, err := (engine.Engine{Strict: false, LintMode: false, EnableDNS: false}).Render(loaded, renderValues)
 	if err != nil {
-		return run.failedRender(ctx, "template", helmRenderTemplateCode, err)
+		return run.failedRender(ctx, "template", helmRenderTemplateCode, "the chart templates could not be executed")
 	}
 	return run.decode(ctx, rendered, effectiveValuesHash)
 }
@@ -557,7 +569,12 @@ func isNonManifestTemplate(name string) bool {
 // failedRender returns the render fact for a chart that could not be rendered. A
 // context that is already done is an error rather than a render fact, so a
 // cancelled analysis never emits a failure it did not observe.
-func (run renderRun) failedRender(ctx context.Context, phase, code string, cause error) (model.Delta, error) {
+//
+// detail is the analyzer's own account of the failure, never the SDK's: loader,
+// values and template errors quote chart source lines, failing values and the
+// random render directory, and a render diagnostic reproduces none of those. It
+// reports what the decode path reports — the phase, the profile and the chart.
+func (run renderRun) failedRender(ctx context.Context, phase, code, detail string) (model.Delta, error) {
 	if err := contextError(ctx); err != nil {
 		return model.Delta{}, err
 	}
@@ -566,11 +583,57 @@ func (run renderRun) failedRender(ctx context.Context, phase, code string, cause
 	render := run.newRender(canonicalSHA256(nil))
 	render.Status = "failed"
 	render.Phase = phase
-	// The SDK reports paths inside the render directory, whose name is random
-	// per run; keeping it out of the message keeps diagnostics deterministic.
-	message := strings.ReplaceAll(fmt.Sprintf("%v", cause), run.directory, "<render>")
-	run.addRenderDiagnostic(render, code, phase, "render profile "+run.profile.Name+" could not be rendered: "+message)
+	run.addRenderDiagnostic(render, code, phase, "render profile "+run.profile.Name+" could not be rendered: "+detail)
 	return run.delta(render), nil
+}
+
+// validateRenderValues is Helm's ValidateAgainstSchema over the coalesced value
+// tree, with one difference: it compiles through compileValuesSchema, whose
+// loader refuses every external reference. Helm's compiler would resolve an
+// http, https or file $ref and turn a chart into an egress channel.
+func validateRenderValues(charter chartapi.Charter, values map[string]any) (reterr error) {
+	// Helm recovers here too: the schema library panics on some inputs, and a
+	// chart must not be able to end an analysis that way.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			reterr = fmt.Errorf("values schema validation panicked: %v", recovered)
+		}
+	}()
+	accessor, err := chartapi.NewAccessor(charter)
+	if err != nil {
+		return err
+	}
+	if schemaJSON := accessor.Schema(); len(schemaJSON) > 0 {
+		document, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaJSON))
+		if err != nil {
+			return err
+		}
+		schema, err := compileValuesSchema(document)
+		if err != nil {
+			return err
+		}
+		if err := schema.Validate(values); err != nil {
+			return err
+		}
+	}
+	for _, dependency := range accessor.Dependencies() {
+		child, err := chartapi.NewAccessor(dependency)
+		if err != nil {
+			return err
+		}
+		declared, exists := values[child.Name()]
+		if !exists || declared == nil {
+			continue
+		}
+		subchartValues, ok := declared.(map[string]any)
+		if !ok {
+			return fmt.Errorf("values for subchart %s are not a mapping", child.Name())
+		}
+		if err := validateRenderValues(dependency, subchartValues); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (run renderRun) newRender(effectiveValuesHash string) *model.HelmRender {

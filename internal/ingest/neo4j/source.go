@@ -108,11 +108,18 @@ func (s *Source) Load(ctx context.Context) (ingest.Result, error) {
 			}
 
 			artifact := rawArtifact(row)
-			if source, ok := row.Source.(string); !ok {
+			source, isString := row.Source.(string)
+			switch {
+			case !isString:
 				s.addDiagnostic(result.Diagnostics, "IAC_GRAPH_SOURCE_MISSING", row.Path, artifact.ID, "graph artifact source is missing or is not a string")
-			} else if !matchesDigest(source, row.SHA256) {
+			case source == "" && isLowerSHA256(row.SHA256) && row.SHA256 != digest(""):
+				// This is how the analyzer itself writes an artifact it could not
+				// read as text: no source, the digest of the raw bytes. Reading it
+				// back is the same ineligible raw artifact, not a mismatch.
+				s.addDiagnostic(result.Diagnostics, ingest.SourceNotTextCode, row.Path, artifact.ID, ingest.SourceNotTextMessage).Severity = "warning"
+			case !matchesDigest(source, row.SHA256):
 				s.addDiagnostic(result.Diagnostics, "IAC_GRAPH_SOURCE_HASH_MISMATCH", row.Path, artifact.ID, "graph artifact source sha256 does not match")
-			} else {
+			default:
 				artifact.Source = source
 				artifact.SHA256 = row.SHA256
 				artifact.SizeBytes = int64(len([]byte(source)))
@@ -183,8 +190,10 @@ func digest(source string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Source) addDiagnostic(diagnostics map[string]*model.Diagnostic, code, path, artifactID, message string) {
-	diagnostics[code+":"+path] = &model.Diagnostic{ID: model.SemanticID(s.appName, "ingest", "diagnostic", code, path), Kind: "diagnostic", Severity: "error", Code: code, Message: message, ArtifactID: artifactID}
+func (s *Source) addDiagnostic(diagnostics map[string]*model.Diagnostic, code, path, artifactID, message string) *model.Diagnostic {
+	diagnostic := &model.Diagnostic{ID: model.SemanticID(s.appName, "ingest", "diagnostic", code, path), Kind: "diagnostic", Severity: "error", Code: code, Message: message, ArtifactID: artifactID}
+	diagnostics[code+":"+path] = diagnostic
+	return diagnostic
 }
 
 // artifactByID is local to this package and deliberately avoids adding a

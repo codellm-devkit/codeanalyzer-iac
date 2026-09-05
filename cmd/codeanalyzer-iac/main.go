@@ -25,6 +25,9 @@ import (
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/reconcile"
 )
 
+// version is stamped at build time: `make build` passes -ldflags "-X
+// main.version=$(VERSION)". It is what --version prints and what every analysis
+// document is stamped with.
 var version = "0.1.0-dev"
 
 type coreRunner struct{}
@@ -57,7 +60,7 @@ func (coreRunner) Run(ctx context.Context, opts options.Options) error {
 		return err
 	}
 
-	analysis, analysisErr := core.New(opts, source, dialect.NewRegistry(helm.New())).Analyze(ctx)
+	analysis, analysisErr := core.New(opts, source, dialect.NewRegistry(helm.New()), version).Analyze(ctx)
 	if analysis == nil {
 		return analysisErr
 	}

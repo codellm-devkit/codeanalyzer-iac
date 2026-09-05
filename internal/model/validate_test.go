@@ -35,7 +35,7 @@ func TestApplyRejectsUnknownRelationshipWithoutMutation(t *testing.T) {
 }
 
 func TestValidateAndSchemaRejectUnknownRelationship(t *testing.T) {
-	analysis := NewAnalysis(3, fixtureApplication())
+	analysis := NewAnalysis(3, fixtureApplication(), "dev")
 	unknown := Relationship("iac_typo")
 	analysis.Application.Edges[unknown] = map[string]Edge{
 		"edge": {Src: analysis.Application.ID, Dst: analysis.Application.Artifacts["Chart.yaml"].ID},
@@ -325,9 +325,21 @@ func TestNewAnalysisRejectsOutOfRangeLevel(t *testing.T) {
 					t.Fatalf("NewAnalysis(%d) did not reject the invalid level", level)
 				}
 			}()
-			NewAnalysis(level, fixtureApplication())
+			NewAnalysis(level, fixtureApplication(), "dev")
 		})
 	}
+}
+
+// TestNewAnalysisRejectsEmptyVersion holds the other half of the envelope: a
+// document with no analyzer version is one the accepted schema rejects, so the
+// constructor refuses it rather than substituting a placeholder.
+func TestNewAnalysisRejectsEmptyVersion(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewAnalysis did not reject an empty version")
+		}
+	}()
+	NewAnalysis(1, fixtureApplication(), "")
 }
 
 func TestValidateRejectsSecretDataWithoutHash(t *testing.T) {
@@ -358,7 +370,7 @@ func TestCompleteFixturePassesSemanticValidationAndRecursivelyExposesNodes(t *te
 }
 
 func TestTypedFixtureValidatesEmbeddedSchemaAndUsesSnakeCase(t *testing.T) {
-	analysis := NewAnalysis(3, completeFixtureApplication())
+	analysis := NewAnalysis(3, completeFixtureApplication(), "dev")
 	analysis.Analyzer.Version = "test"
 	encoded, err := json.Marshal(analysis)
 	if err != nil {
