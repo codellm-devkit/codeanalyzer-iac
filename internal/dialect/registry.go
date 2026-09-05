@@ -47,6 +47,9 @@ func NewRegistry(frontends ...Frontend) *Registry {
 	return &Registry{frontends: ordered}
 }
 
+// Frontends returns the compiled frontends in their deterministic name order.
+func (r *Registry) Frontends() []Frontend { return append([]Frontend(nil), r.frontends...) }
+
 // Detect invokes every compiled detector for a single artifact. Exactly zero or
 // one frontend may claim the source; multiple claims are a deterministic error.
 func (r *Registry) Detect(artifactContext ArtifactContext) (Detection, error) {

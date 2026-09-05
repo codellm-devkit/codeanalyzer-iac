@@ -13,12 +13,16 @@ import (
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
 
+// InvalidConfigCode marks a configuration that cannot be rendered as declared.
+// The orchestrator treats its presence as an analyzer-wide failure, so the
+// constant is shared rather than restated there.
+const InvalidConfigCode = "IAC_HELM_INVALID_CONFIG"
+
 const (
-	helmInvalidConfigCode = "IAC_HELM_INVALID_CONFIG"
-	configDialectName     = "config"
-	configVersion         = 1
-	defaultProfileName    = "default"
-	defaultNamespaceName  = "default"
+	configDialectName    = "config"
+	configVersion        = 1
+	defaultProfileName   = "default"
+	defaultNamespaceName = "default"
 	// releaseNameLimit and releaseDigestLength keep every derived release name
 	// inside Helm's own 53-character release-name rule.
 	releaseNameLimit    = 53
@@ -289,8 +293,8 @@ func addConfigDiagnostic(delta *model.Delta, artifact *model.Artifact, message, 
 	if delta.Diagnostics == nil {
 		delta.Diagnostics = map[string]*model.Diagnostic{}
 	}
-	id := semanticIDForArtifact(artifact, "diagnostic", helmInvalidConfigCode, discriminator)
-	delta.Diagnostics[id] = &model.Diagnostic{ID: id, Kind: "diagnostic", Severity: "error", Code: helmInvalidConfigCode, Message: message, Phase: "load", ArtifactID: artifact.ID}
+	id := semanticIDForArtifact(artifact, "diagnostic", InvalidConfigCode, discriminator)
+	delta.Diagnostics[id] = &model.Diagnostic{ID: id, Kind: "diagnostic", Severity: "error", Code: InvalidConfigCode, Message: message, Phase: "load", ArtifactID: artifact.ID}
 	addEdge(delta, model.IaCHasDiagnostic, artifact.ID, id)
 }
 

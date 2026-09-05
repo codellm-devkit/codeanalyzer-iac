@@ -113,11 +113,8 @@ func (frontend) Resolve(ctx context.Context, app *model.Application) (model.Delt
 	return resolveContext(ctx, app)
 }
 
-func (frontend) Evaluate(ctx context.Context, _ *model.Application, _ dialect.EvaluationInput) (model.Delta, error) {
-	if err := contextError(ctx); err != nil {
-		return model.Delta{}, err
-	}
-	return model.Delta{}, nil
+func (frontend) Evaluate(ctx context.Context, app *model.Application, input dialect.EvaluationInput) (model.Delta, error) {
+	return evaluate(ctx, app, input)
 }
 
 func contextError(ctx context.Context) error {

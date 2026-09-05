@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/codellm-devkit/codeanalyzer-iac/internal/dialect"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
 
@@ -941,6 +942,48 @@ func TestRenderSingleRegionTemplateAttributesEveryDocument(t *testing.T) {
 	for _, key := range sortedKeysLocal(render.Resources) {
 		if origins := render.Resources[key].OriginIDs; !slices.Equal(origins, []string{region}) {
 			t.Errorf("resource %s origins = %#v, want the file's only region %q", key, origins, region)
+		}
+	}
+}
+
+// TestEvaluateRendersEveryDeclaredProfile covers the L3 phase as a whole: every
+// chart default profile and every configured profile is rendered, and the
+// merged facts never depend on how many workers rendered them.
+func TestEvaluateRendersEveryDeclaredProfile(t *testing.T) {
+	app, artifacts := inlineApplication(t, map[string]string{
+		"Chart.yaml":             "apiVersion: v2\nname: many\nversion: 0.1.0\n",
+		"templates/config.yaml":  "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}\ndata:\n  tier: '{{ .Values.tier }}'\n",
+		"values.yaml":            "tier: base\n",
+		"values-production.yaml": "tier: production\n",
+		".codeanalyzer-iac.yaml": "version: 1\nrenders:\n  - name: staging\n    chart: Chart.yaml\n  - name: production\n    chart: Chart.yaml\n" +
+			"    values:\n      - values-production.yaml\n",
+	})
+	config := artifacts[".codeanalyzer-iac.yaml"]
+	applyProfiles(t, app, config.ID)
+
+	want := ""
+	for _, jobs := range []int{1, 4} {
+		input := dialect.EvaluationInput{Artifacts: app.Artifacts, ConfigArtifactID: config.ID, Jobs: jobs, TempRoot: t.TempDir()}
+		delta, err := New().Evaluate(t.Context(), app, input)
+		if err != nil {
+			t.Fatalf("Evaluate() error = %v", err)
+		}
+		renders := delta.ArtifactPatches[artifacts["Chart.yaml"].ID].Renders
+		if len(renders) != 3 {
+			t.Fatalf("renders = %d, want the chart default profile and both configured profiles", len(renders))
+		}
+		for _, key := range sortedKeysLocal(renders) {
+			if renders[key].Status != "succeeded" {
+				t.Fatalf("render %s status = %q, want succeeded", key, renders[key].Status)
+			}
+		}
+		got := mustJSON(t, jsonDocument(t, delta))
+		if want == "" {
+			want = got
+			continue
+		}
+		if got != want {
+			t.Error("evaluation output depends on the number of workers")
 		}
 	}
 }

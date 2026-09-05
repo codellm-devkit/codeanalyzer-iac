@@ -282,7 +282,7 @@ func TestInvalidConfigDiagnosesAndEmitsNoConfigProfiles(t *testing.T) {
 				t.Fatalf("invalid config produced no diagnostic: %#v", app.Diagnostics)
 			}
 			for _, diagnostic := range diagnostics {
-				if diagnostic.Code != helmInvalidConfigCode || diagnostic.Severity != "error" {
+				if diagnostic.Code != InvalidConfigCode || diagnostic.Severity != "error" {
 					t.Errorf("config diagnostic = %#v", diagnostic)
 				}
 				assertEdge(t, app, model.IaCHasDiagnostic, config.ID, diagnostic.ID)

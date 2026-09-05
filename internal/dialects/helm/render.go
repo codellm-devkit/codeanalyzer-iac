@@ -20,6 +20,9 @@ import (
 	"helm.sh/helm/v4/pkg/engine"
 	"helm.sh/helm/v4/pkg/strvals"
 
+	"golang.org/x/sync/errgroup"
+
+	"github.com/codellm-devkit/codeanalyzer-iac/internal/dialect"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
 
@@ -627,4 +630,132 @@ func canonicalSHA256(value any) string {
 func digestBytes(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
+}
+
+// profileRender is one scheduled render: the chart facet to render and the
+// profile that configures it.
+type profileRender struct {
+	chart   *model.HelmChart
+	profile *model.HelmRenderProfile
+}
+
+// evaluate renders every declared profile - the default profile of each chart
+// and every profile the selected configuration declares - and returns their
+// facts as one delta. Renders are independent, so they run concurrently up to
+// the requested worker count and are merged back in profile-identity order.
+func evaluate(ctx context.Context, app *model.Application, input dialect.EvaluationInput) (model.Delta, error) {
+	if err := contextError(ctx); err != nil {
+		return model.Delta{}, err
+	}
+	renders := scheduledRenders(app, input.ConfigArtifactID)
+	if len(renders) == 0 {
+		return model.Delta{}, nil
+	}
+	workers := input.Jobs
+	if workers < 1 {
+		workers = 1
+	}
+
+	deltas := make([]model.Delta, len(renders))
+	group, groupContext := errgroup.WithContext(ctx)
+	group.SetLimit(workers)
+	for index, render := range renders {
+		group.Go(func() error {
+			delta, err := renderProfile(groupContext, app, render.chart, render.profile, input.TempRoot)
+			if err != nil {
+				return fmt.Errorf("render profile %s: %w", render.profile.ID, err)
+			}
+			deltas[index] = delta
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return model.Delta{}, err
+	}
+
+	merged := model.Delta{}
+	for _, delta := range deltas {
+		mergeRenderDelta(&merged, delta)
+	}
+	return merged, nil
+}
+
+// scheduledRenders returns every chart and profile pair to render, ordered by
+// profile identity so the merged delta never depends on completion order.
+func scheduledRenders(app *model.Application, configArtifactID string) []profileRender {
+	if app == nil {
+		return nil
+	}
+	artifacts := artifactsByID(app)
+	renders := make([]profileRender, 0)
+	add := func(profile *model.HelmRenderProfile) {
+		if profile == nil {
+			return
+		}
+		chart, ok := artifacts[profile.ChartID]
+		if !ok {
+			return
+		}
+		if facet, ok := chart.IaC.(*model.HelmChart); ok && facet != nil {
+			renders = append(renders, profileRender{chart: facet, profile: profile})
+		}
+	}
+	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
+		artifact := app.Artifacts[artifactPath]
+		facet, ok := artifact.IaC.(*model.HelmChart)
+		if !ok || facet == nil {
+			continue
+		}
+		for _, name := range sortedKeysLocal(facet.RenderProfiles) {
+			add(facet.RenderProfiles[name])
+		}
+	}
+	if config := artifacts[configArtifactID]; config != nil && config.CodeAnalyzerIaCConfig != nil {
+		for _, name := range sortedKeysLocal(config.CodeAnalyzerIaCConfig.RenderProfiles) {
+			add(config.CodeAnalyzerIaCConfig.RenderProfiles[name])
+		}
+	}
+	sort.Slice(renders, func(i, j int) bool { return renders[i].profile.ID < renders[j].profile.ID })
+	return renders
+}
+
+// mergeRenderDelta unions one render's facts into an accumulator. Keys are
+// derived from render identity, so two renders never disagree about one key.
+// renderProfile is the only producer, and the one artifact patch it emits
+// carries renders alone.
+func mergeRenderDelta(destination *model.Delta, source model.Delta) {
+	unionInto(&destination.Packages, source.Packages)
+	unionInto(&destination.ExternalChartReferences, source.ExternalChartReferences)
+	unionInto(&destination.KubernetesResourceAddresses, source.KubernetesResourceAddresses)
+	unionInto(&destination.Diagnostics, source.Diagnostics)
+	for _, artifactID := range sortedKeysLocal(source.ArtifactPatches) {
+		if destination.ArtifactPatches == nil {
+			destination.ArtifactPatches = map[string]model.ArtifactPatch{}
+		}
+		patch := destination.ArtifactPatches[artifactID]
+		if patch.Renders == nil {
+			patch.Renders = map[string]*model.HelmRender{}
+		}
+		for _, key := range sortedKeysLocal(source.ArtifactPatches[artifactID].Renders) {
+			patch.Renders[key] = source.ArtifactPatches[artifactID].Renders[key]
+		}
+		destination.ArtifactPatches[artifactID] = patch
+	}
+	for relationship, edges := range source.Edges {
+		for _, key := range sortedKeysLocal(edges) {
+			addEdge(destination, relationship, edges[key].Src, edges[key].Dst)
+		}
+	}
+}
+
+func unionInto[V any](destination *map[string]V, source map[string]V) {
+	if len(source) == 0 {
+		return
+	}
+	if *destination == nil {
+		*destination = make(map[string]V, len(source))
+	}
+	for _, key := range sortedKeysLocal(source) {
+		(*destination)[key] = source[key]
+	}
 }
