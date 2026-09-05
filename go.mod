@@ -8,6 +8,7 @@ require (
 	github.com/dlclark/regexp2 v1.11.0
 	github.com/goccy/go-yaml v1.19.2
 	github.com/google/go-cmp v0.7.0
+	github.com/neo4j/neo4j-go-driver/v5 v5.28.4
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sync v0.22.0

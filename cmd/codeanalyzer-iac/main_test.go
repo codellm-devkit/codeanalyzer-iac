@@ -101,18 +101,63 @@ func TestSchemaEmissionNeedsNoInput(t *testing.T) {
 	}
 }
 
-func TestGraphEmissionIsReportedAsUnavailable(t *testing.T) {
-	workspace := workspace(t, map[string]string{"Chart.yaml": "apiVersion: v2\nname: partial\nversion: 0.1.0\n"})
-
-	stdout, stderr, err := run(t, "--workspace-root", workspace, "--emit", "cypher")
-	if err == nil {
-		t.Fatal("cypher emission is not implemented and must fail")
+// TestCypherEmissionIsIndependentOfWorkerCount is the determinism gate the
+// spec asks for: identical bytes across repeated runs and worker counts.
+func TestCypherEmissionIsIndependentOfWorkerCount(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", "..", "testdata", "helm", "profiles"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(stderr, ErrGraphEmissionUnavailable.Error()) {
-		t.Errorf("stderr = %q, want the graph emission failure", stderr)
+	single, stderr, err := run(t, "--workspace-root", root, "--app-name", "payments",
+		"--config", ".codeanalyzer-iac.yaml", "--emit", "cypher", "--jobs", "1")
+	if err != nil {
+		t.Fatalf("cypher emission failed: %v: %s", err, stderr)
+	}
+	parallel, stderr, err := run(t, "--workspace-root", root, "--app-name", "payments",
+		"--config", ".codeanalyzer-iac.yaml", "--emit", "cypher", "--jobs", "8")
+	if err != nil {
+		t.Fatalf("cypher emission failed: %v: %s", err, stderr)
+	}
+	if single != parallel {
+		t.Error("the generated Cypher depends on the worker count")
+	}
+	if !strings.Contains(single, "CREATE CONSTRAINT artifact_id") || !strings.Contains(single, "MERGE (s)-[:HAS_ARTIFACT]->(t)") {
+		t.Error("the generated Cypher is not a complete script")
+	}
+	if strings.Contains(single, "\nkind: Deployment") {
+		t.Error("analyzed source reached the script outside a string literal")
+	}
+}
+
+func TestCypherEmissionWritesGraphCypher(t *testing.T) {
+	workspace := workspace(t, map[string]string{"Chart.yaml": "apiVersion: v2\nname: written\nversion: 0.1.0\n"})
+	output := filepath.Join(t.TempDir(), "out")
+
+	stdout, stderr, err := run(t, "--workspace-root", workspace, "--emit", "cypher", "--output", output)
+	if err != nil {
+		t.Fatalf("cypher emission failed: %v: %s", err, stderr)
 	}
 	if stdout != "" {
-		t.Errorf("stdout = %q, want nothing", stdout)
+		t.Errorf("stdout = %q, want nothing when writing to a directory", stdout)
+	}
+	script, err := os.ReadFile(filepath.Join(output, "graph.cypher"))
+	if err != nil {
+		t.Fatalf("graph.cypher was not written: %v", err)
+	}
+	if !strings.Contains(string(script), "MERGE (n:Artifact {id: row.id})") {
+		t.Error("graph.cypher carries no artifact upsert")
+	}
+}
+
+func TestDirectGraphWriteNeedsAConnection(t *testing.T) {
+	workspace := workspace(t, map[string]string{"Chart.yaml": "apiVersion: v2\nname: unreachable\nversion: 0.1.0\n"})
+
+	_, stderr, err := run(t, "--workspace-root", workspace, "--emit", "neo4j")
+	if err == nil {
+		t.Fatal("a direct graph write without a URI must fail")
+	}
+	if !strings.Contains(stderr, "--emit neo4j requires --neo4j-uri") {
+		t.Errorf("stderr = %q, want the missing-connection failure", stderr)
 	}
 }
 

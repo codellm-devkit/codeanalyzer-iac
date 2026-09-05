@@ -48,7 +48,7 @@ func New(version string, run Runner) *cobra.Command {
 	flags.StringVarP(&opts.OutputDir, "output", "o", "", "output directory")
 	flags.StringVarP(&opts.Format, "format", "f", opts.Format, "output format")
 	flags.StringVar((*string)(&opts.Emit), "emit", string(opts.Emit), "output target")
-	flags.BoolVar(&opts.Eager, "eager", false, "force a clean analysis")
+	flags.BoolVar(&opts.Eager, "eager", false, "reconcile away this analyzer's stale graph facts")
 	flags.BoolVar(&opts.Strict, "strict", false, "treat diagnostics as errors")
 	flags.StringVar(&opts.Neo4jURI, "neo4j-uri", "", "Neo4j connection URI")
 	flags.StringVar(&opts.Neo4jUser, "neo4j-user", "", "Neo4j username")
