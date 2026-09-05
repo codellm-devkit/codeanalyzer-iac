@@ -598,6 +598,8 @@ func fullFixtureAnalysis() *model.Analysis {
 	edge(model.DefinesConfig, configArtifact.ID, configKey.ID)
 	edge(model.IaCAliasOf, chartAlias.ID, chart.ID)
 	edge(model.IaCAliasOf, addressAlias.ID, address.ID)
+	edge(model.IaCHasAlias, chart.ID, chartAlias.ID)
+	edge(model.IaCHasAlias, template.ID, addressAlias.ID)
 	for _, member := range []*model.Artifact{requirements, lock, values, valuesSchema, template, crd, ignore} {
 		edge(model.IaCPartOfChart, member.ID, chart.ID)
 	}
@@ -609,6 +611,8 @@ func fullFixtureAnalysis() *model.Analysis {
 	edge(model.IaCHasTemplateCall, template.ID, templateCall.ID)
 	edge(model.IaCCallsTemplate, templateCall.ID, namedTemplate.ID)
 	edge(model.IaCHasValueReference, template.ID, valueReference.ID)
+	edge(model.IaCHasResourceTemplate, template.ID, resourceTemplate.ID)
+	edge(model.IaCHasLookupReference, template.ID, lookupReference.ID)
 	edge(model.IaCReferencesValue, valueReference.ID, valuesKey.ID)
 	edge(model.IaCDeclaresProfile, chart.ID, defaultProfile.ID)
 	edge(model.IaCDeclaresProfile, configArtifact.ID, productionProfile.ID)

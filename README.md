@@ -255,6 +255,18 @@ and source spans; a native or logical address is an `IdentityAlias`, never a
 replacement identity. Aliases never chain: one alias resolves to exactly one
 canonical node.
 
+Every construct L1 records is reachable from the file that declares it, so a
+contained node is never an island — not even when no rendered resource claims it
+as an origin:
+
+| edge | shape |
+| --- | --- |
+| `(:HelmTemplate)-[:IAC_HAS_RESOURCE_TEMPLATE]->(:HelmResourceTemplate)` | one per `resource_templates{}` entry of the template facet |
+| `(:HelmTemplate)-[:IAC_HAS_LOOKUP_REFERENCE]->(:HelmLookupReference)` | one per `lookup_references{}` entry of the template facet |
+| `(:Artifact)-[:IAC_HAS_ALIAS]->(:IaCAlias)` | one per `aliases[]` entry of the owning artifact |
+
+They are identity-only, present from L1 onward, and monotone through L2 and L3.
+
 Every IaC dialect is reachable from one query:
 
 ```cypher
@@ -349,7 +361,8 @@ Cypher, logs — reproduces it.
   resource gets an `IAC_DERIVED_FROM` edge to its source region only when the
   template file has exactly one resource-bearing region. A file with several
   regions — or with a masked conditional — cannot be attributed without
-  rendering the mapping, so no origin is claimed rather than a wrong one.
+  rendering the mapping, so no origin is claimed rather than a wrong one. Such a
+  region is still reachable through `IAC_HAS_RESOURCE_TEMPLATE` from its file.
 - **`plural` is only emitted for built-in kinds.** The resource plural comes
   from the compiled client-go scheme. A custom resource, including one whose CRD
   is in the same chart, carries an empty plural rather than a guess.

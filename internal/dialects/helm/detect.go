@@ -94,6 +94,12 @@ func (frontend) Parse(ctx context.Context, artifact *model.Artifact, detection d
 		for _, reference := range facet.ValueReferences {
 			addEdge(&delta, model.IaCHasValueReference, artifact.ID, reference.ID)
 		}
+		for _, resourceTemplate := range facet.ResourceTemplates {
+			addEdge(&delta, model.IaCHasResourceTemplate, artifact.ID, resourceTemplate.ID)
+		}
+		for _, lookup := range facet.LookupReferences {
+			addEdge(&delta, model.IaCHasLookupReference, artifact.ID, lookup.ID)
+		}
 	case "helm_crd":
 		delta = parseCRDContext(ctx, artifact, detection).delta
 	case "helm_ignore":

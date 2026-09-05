@@ -250,6 +250,9 @@ func validateAliases(app *Application, nodes map[string]Node) []string {
 			if edgeCount(app, IaCAliasOf, alias.ID, alias.Target) != 1 {
 				errors = append(errors, "alias must have exactly one matching iac_alias_of edge: "+alias.ID)
 			}
+			if edgeCount(app, IaCHasAlias, artifact.ID, alias.ID) != 1 {
+				errors = append(errors, "alias containment must have exactly one iac_has_alias edge: "+alias.ID)
+			}
 		}
 	}
 	return errors
@@ -298,6 +301,16 @@ func validateContainment(app *Application, nodes map[string]Node) []string {
 			for _, node := range facet.ValueReferences {
 				if node != nil && edgeCount(app, IaCHasValueReference, artifact.ID, node.ID) != 1 {
 					errors = append(errors, "value-reference containment missing: "+node.ID)
+				}
+			}
+			for _, node := range facet.ResourceTemplates {
+				if node != nil && edgeCount(app, IaCHasResourceTemplate, artifact.ID, node.ID) != 1 {
+					errors = append(errors, "resource-template containment missing: "+node.ID)
+				}
+			}
+			for _, node := range facet.LookupReferences {
+				if node != nil && edgeCount(app, IaCHasLookupReference, artifact.ID, node.ID) != 1 {
+					errors = append(errors, "lookup-reference containment missing: "+node.ID)
 				}
 			}
 		}

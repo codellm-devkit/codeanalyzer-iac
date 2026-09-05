@@ -21,6 +21,8 @@ const (
 	IaCCallsTemplate         Relationship = "iac_calls_template"
 	IaCHasValueReference     Relationship = "iac_has_value_reference"
 	IaCReferencesValue       Relationship = "iac_references_value"
+	IaCHasResourceTemplate   Relationship = "iac_has_resource_template"
+	IaCHasLookupReference    Relationship = "iac_has_lookup_reference"
 	IaCDeclaresProfile       Relationship = "iac_declares_profile"
 	IaCRendersChart          Relationship = "iac_renders_chart"
 	IaCHasValueLayer         Relationship = "iac_has_value_layer"
@@ -31,6 +33,7 @@ const (
 	IaCProduces              Relationship = "iac_produces"
 	IaCTargetsResource       Relationship = "iac_targets_resource"
 	IaCDerivedFrom           Relationship = "iac_derived_from"
+	IaCHasAlias              Relationship = "iac_has_alias"
 )
 
 type Node interface {
@@ -179,7 +182,7 @@ func newEdgeMaps() map[Relationship]map[string]Edge {
 }
 
 var allowedRelationships = map[Relationship]struct{}{
-	HasArtifact: {}, DefinesConfig: {}, IaCPartOfChart: {}, IaCDeclaresDependency: {}, IaCTargetsChartReference: {}, IaCResolvesToChart: {}, IaCIdentifiedByPackage: {}, IaCDefinesTemplate: {}, IaCHasTemplateCall: {}, IaCCallsTemplate: {}, IaCHasValueReference: {}, IaCReferencesValue: {}, IaCDeclaresProfile: {}, IaCRendersChart: {}, IaCHasValueLayer: {}, IaCReadsFrom: {}, IaCHasRender: {}, IaCConfiguredBy: {}, IaCHasDiagnostic: {}, IaCProduces: {}, IaCTargetsResource: {}, IaCDerivedFrom: {}, IaCAliasOf: {},
+	HasArtifact: {}, DefinesConfig: {}, IaCPartOfChart: {}, IaCDeclaresDependency: {}, IaCTargetsChartReference: {}, IaCResolvesToChart: {}, IaCIdentifiedByPackage: {}, IaCDefinesTemplate: {}, IaCHasTemplateCall: {}, IaCCallsTemplate: {}, IaCHasValueReference: {}, IaCReferencesValue: {}, IaCDeclaresProfile: {}, IaCRendersChart: {}, IaCHasValueLayer: {}, IaCReadsFrom: {}, IaCHasRender: {}, IaCConfiguredBy: {}, IaCHasDiagnostic: {}, IaCProduces: {}, IaCTargetsResource: {}, IaCDerivedFrom: {}, IaCHasResourceTemplate: {}, IaCHasLookupReference: {}, IaCHasAlias: {}, IaCAliasOf: {},
 }
 
 func isAllowedRelationship(relationship Relationship) bool {

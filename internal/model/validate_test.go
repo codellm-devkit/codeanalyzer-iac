@@ -520,6 +520,8 @@ func completeFixtureApplication() *Application {
 	addEdge(app, IaCDefinesTemplate, templateID, namedTemplateID)
 	addEdge(app, IaCHasTemplateCall, templateID, templateCallID)
 	addEdge(app, IaCHasValueReference, templateID, valueReferenceID)
+	addEdge(app, IaCHasResourceTemplate, templateID, resourceTemplateID)
+	addEdge(app, IaCHasLookupReference, templateID, lookupReferenceID)
 	addEdge(app, IaCCallsTemplate, templateCallID, namedTemplateID)
 	addEdge(app, IaCReferencesValue, valueReferenceID, keyID)
 	return app

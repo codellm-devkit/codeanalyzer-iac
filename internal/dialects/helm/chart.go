@@ -204,6 +204,7 @@ func parseChart(ctx context.Context, artifact *model.Artifact, detection dialect
 			patch.Aliases = []model.IdentityAlias{alias}
 			delta.ArtifactPatches[artifact.ID] = patch
 			addEdge(&delta, model.IaCAliasOf, aliasID, artifact.ID)
+			addEdge(&delta, model.IaCHasAlias, artifact.ID, aliasID)
 		}
 	}
 	return delta

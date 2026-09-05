@@ -155,7 +155,53 @@ func TestAcceptanceDayTrader(t *testing.T) {
 		}
 	})
 
+	// Every L1 child that nests under a facet in JSON is reachable from its
+	// owner in the graph. The ten conditional Route/Service resource templates
+	// carry no render provenance, so containment is the only edge they have.
+	t.Run("containment edges", func(t *testing.T) {
+		templates := 0
+		for _, path := range sortedKeys(document.Application.Artifacts) {
+			artifact := document.Application.Artifacts[path]
+			if artifact.IaC == nil {
+				continue
+			}
+			for _, key := range sortedKeys(artifact.IaC.ResourceTemplates) {
+				templates++
+				assertExactlyOneEdge(t, document, "iac_has_resource_template", artifact.ID, artifact.IaC.ResourceTemplates[key].ID)
+			}
+		}
+		if templates != 18 {
+			t.Errorf("resource templates = %d, want 18", templates)
+		}
+		if got := len(document.Application.Edges["iac_has_resource_template"]); got != templates {
+			t.Errorf("iac_has_resource_template edges = %d, want %d", got, templates)
+		}
+		chart := document.chartArtifact(t)
+		if len(chart.Aliases) != 1 {
+			t.Fatalf("chart aliases = %#v, want exactly one", chart.Aliases)
+		}
+		assertExactlyOneEdge(t, document, "iac_has_alias", chart.ID, chart.Aliases[0].ID)
+		if got := len(document.Application.Edges["iac_has_alias"]); got != 1 {
+			t.Errorf("iac_has_alias edges = %d, want 1", got)
+		}
+	})
+
 	assertContractConformance(t, repo.Name, levels)
+}
+
+// assertExactlyOneEdge is the counterpart rule the accepted checker enforces:
+// one containment edge per nested child, no more and no fewer.
+func assertExactlyOneEdge(t *testing.T, document analysisDocument, family, src, dst string) {
+	t.Helper()
+	found := 0
+	for _, edge := range document.Application.Edges[family] {
+		if edge.Src == src && edge.Dst == dst {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Errorf("%s edges %s -> %s = %d, want 1", family, src, dst, found)
+	}
 }
 
 // TestAcceptanceQuarkusCoffeeShop proves the exact representation of the Quarkus
