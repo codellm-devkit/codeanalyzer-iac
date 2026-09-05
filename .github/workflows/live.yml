@@ -23,6 +23,7 @@ jobs:
     name: pinned revisions
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       neo4j:
         image: neo4j:5
@@ -73,6 +74,7 @@ jobs:
     name: moving head
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       neo4j:
         image: neo4j:5

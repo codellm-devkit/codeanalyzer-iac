@@ -603,16 +603,17 @@ sys.exit(1 if errors else 0)
 func runSemanticChecker(t *testing.T, name string, payload []byte) {
 	t.Helper()
 	repository := os.Getenv(schemaRepoEnv)
-	if repository == "" {
-		repository = defaultSchemaRepo
-	}
 	scripts := filepath.Join(repository, "scripts")
-	if _, err := os.Stat(filepath.Join(scripts, "check_iac.py")); err != nil {
+	reason := fmt.Errorf("%s is not set", schemaRepoEnv)
+	if repository != "" {
+		_, reason = os.Stat(filepath.Join(scripts, "check_iac.py"))
+	}
+	if reason != nil {
 		if os.Getenv("CI") == "" {
-			t.Skipf("the accepted semantic checker is not available: set %s to a codellm-devkit/codeanalyzer-schema checkout (looked in %s)",
-				schemaRepoEnv, scripts)
+			t.Skipf("the accepted semantic checker is not available (%v): set %s to a codellm-devkit/codeanalyzer-schema checkout",
+				reason, schemaRepoEnv)
 		}
-		t.Fatalf("the accepted semantic checker is required in CI: %v", err)
+		t.Fatalf("the accepted semantic checker is required in CI: %v", reason)
 	}
 	directory := t.TempDir()
 	document := filepath.Join(directory, name+".json")

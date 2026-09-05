@@ -36,8 +36,8 @@ make test-live-head  # the declared default branches, for upstream drift
 |---|---|
 | network access to `github.com` | the repositories are cloned per test into `t.TempDir()` |
 | `helm` **v4.2.4** exactly | the independent render oracle; any other version fails the gate |
-| `python3` and `CANIAC_SCHEMA_REPO` | runs `scripts/check_iac.py` from a [`codeanalyzer-schema`](https://github.com/codellm-devkit/codeanalyzer-schema) checkout at `e127901f8ee072d44888f769b35fd5353393c3a3`. Absent locally, the semantic check is skipped with a message; in CI (`CI` set) it is required. |
-| a disposable Neo4j 5.x | `NEO4J_TEST_URI`, `NEO4J_TEST_USERNAME`, `NEO4J_TEST_PASSWORD`, optional `NEO4J_TEST_DATABASE`. Absent, the graph parity gate is skipped. |
+| `python3` and `CANIAC_SCHEMA_REPO` | runs `scripts/check_iac.py` from a [`codeanalyzer-schema`](https://github.com/codellm-devkit/codeanalyzer-schema) checkout at `e127901f8ee072d44888f769b35fd5353393c3a3`. There is no default path: unset or absent, the semantic check is skipped with a message locally and fails in CI (`CI` set). |
+| a disposable Neo4j 5.x | `NEO4J_TEST_URI`, `NEO4J_TEST_USERNAME`, `NEO4J_TEST_PASSWORD`, optional `NEO4J_TEST_DATABASE`. Absent, the graph parity gate is skipped locally and fails in CI (`CI` set). |
 
 ```sh
 NEO4J_TEST_URI=neo4j://localhost:7687 \

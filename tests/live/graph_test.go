@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 
 	neo4jemit "github.com/codellm-devkit/codeanalyzer-iac/internal/emit/neo4j"
@@ -37,7 +38,12 @@ var foreignProperties = map[string]any{"ts_symbols": int64(3), "ts_note": "owned
 func TestGraphParity(t *testing.T) {
 	uri := os.Getenv("NEO4J_TEST_URI")
 	if uri == "" {
-		t.Skip("set NEO4J_TEST_URI, NEO4J_TEST_USERNAME and NEO4J_TEST_PASSWORD to run the live graph gate")
+		const message = "set NEO4J_TEST_URI, NEO4J_TEST_USERNAME and NEO4J_TEST_PASSWORD to run the live graph gate"
+		if os.Getenv("CI") != "" {
+			// A gate that silently skips in CI is not a gate.
+			t.Fatal("the live graph gate is required in CI: " + message)
+		}
+		t.Skip(message)
 	}
 	repositories, err := loadRepositories(manifestJSON)
 	if err != nil {
@@ -83,7 +89,7 @@ func assertGraphParity(t *testing.T, repo repository, uri string) {
 	//    cannot be allowed to disagree.
 	graph.wipe(t, appID)
 	graph.replay(t, filesystemScript)
-	if diff := cmp.Diff(filesystemRows, graph.readApplication(t, appID)); diff != "" {
+	if diff := cmp.Diff(filesystemRows, graph.readApplication(t, appID), cmpopts.EquateEmpty()); diff != "" {
 		t.Fatalf("the Cypher projection replays to a different row set (-bolt +cypher):\n%s", diff)
 	}
 
@@ -114,7 +120,7 @@ func assertGraphParity(t *testing.T, repo repository, uri string) {
 	//    are asserted separately below.
 	wantRows := withoutIngestDiagnostics(appID, filesystemRows)
 	gotRows := withoutForeignFacts(withoutIngestDiagnostics(appID, graphRows))
-	if diff := cmp.Diff(wantRows, gotRows); diff != "" {
+	if diff := cmp.Diff(wantRows, gotRows, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("graph-mode row set differs from filesystem mode (-filesystem +graph):\n%s", diff)
 	}
 

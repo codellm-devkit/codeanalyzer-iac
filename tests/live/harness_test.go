@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	apiyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
@@ -185,6 +187,71 @@ func TestHarnessRequiresPinnedHelm(t *testing.T) {
 	t.Logf("helm oracle: %s", strings.TrimSpace(installed))
 }
 
+// TestHarnessNormalizesSecretMaterial proves the oracle applies the analyzer's
+// own Secret sanitization before digesting, so a Secret compares on content and
+// not merely on identity, and no plaintext survives the normalization. It is a
+// unit test over a hand-written document: no clone, no network, no Helm.
+func TestHarnessNormalizesSecretMaterial(t *testing.T) {
+	// The expected digests are written out rather than recomputed, so the test
+	// pins the scheme instead of restating it: `data` values are base64-decoded
+	// before hashing when they decode, `stringData` values are hashed as
+	// written, and a non-string value is hashed through its canonical JSON.
+	const (
+		password = "4e738ca5563c06cfd0018299933d58db1dd8bf97f6973dc99bf6cdc64b5550bd" // sha256("s3cr3t")
+		garbled  = "f655d1b3f03be9cf9717429140f034d18438809781c1447c867e9ce1305e83da" // sha256("not-base64!!")
+		nested   = "3adac1211a148984d9500348944439b253c2bb8091f6a6c48be73bea59dc9e50" // sha256(`{"nested":"x"}`)
+		token    = "23fb79e20d37abf2418d78115eb0cc8c74b52f4ed8b91dda7fc03a1d41fc15e3" // sha256("plain-token")
+	)
+	secret := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata":   map[string]any{"name": "database", "namespace": "payments"},
+		"status":     map[string]any{"observed": true},
+		"data": map[string]any{
+			"password": "czNjcjN0",
+			"garbled":  "not-base64!!",
+			"nested":   map[string]any{"nested": "x"},
+		},
+		"stringData": map[string]any{"token": "plain-token"},
+	}
+	want := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata":   map[string]any{"name": "database", "namespace": "payments"},
+		"data":       map[string]any{"password": password, "garbled": garbled, "nested": nested},
+		"stringData": map[string]any{"token": token},
+	}
+	got := normalizedDocument(secret)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("normalized Secret (-want +got):\n%s", diff)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plaintext := range []string{"s3cr3t", "czNjcjN0", "not-base64!!", "plain-token", "observed"} {
+		if strings.Contains(string(encoded), plaintext) {
+			t.Errorf("%q survived normalization: %s", plaintext, encoded)
+		}
+	}
+
+	// Unreadable secret material is dropped rather than digested, and a document
+	// that is not a Secret keeps its fields untouched apart from status.
+	dropped := normalizedDocument(map[string]any{
+		"apiVersion": "v1", "kind": "Secret", "data": "not-a-mapping", "status": map[string]any{},
+	})
+	if diff := cmp.Diff(map[string]any{"apiVersion": "v1", "kind": "Secret"}, dropped); diff != "" {
+		t.Errorf("unreadable Secret material (-want +got):\n%s", diff)
+	}
+	plain := normalizedDocument(map[string]any{
+		"apiVersion": "v1", "kind": "ConfigMap", "data": map[string]any{"key": "value"}, "status": map[string]any{},
+	})
+	want = map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "data": map[string]any{"key": "value"}}
+	if diff := cmp.Diff(want, plain); diff != "" {
+		t.Errorf("normalized ConfigMap (-want +got):\n%s", diff)
+	}
+}
+
 // TestHarnessRefModeSelectsDeclaredBranch proves the moving-head lane resolves
 // the declared default branch and the pinned lane resolves the pinned commit.
 func TestHarnessRefModeSelectsDeclaredBranch(t *testing.T) {
@@ -255,21 +322,19 @@ const (
 	// active there; only the resolved revision changes.
 	refModeEnv = "CANIAC_LIVE_REF_MODE"
 	// schemaRepoEnv locates the accepted codeanalyzer-schema checkout whose
-	// scripts/check_iac.py is the semantic conformance checker.
+	// scripts/check_iac.py is the semantic conformance checker. There is no
+	// default: a checkout lives wherever the developer put it, and CI sets this.
 	schemaRepoEnv = "CANIAC_SCHEMA_REPO"
-	// defaultSchemaRepo is the local checkout the developer lane falls back to.
-	// CI sets schemaRepoEnv explicitly.
-	defaultSchemaRepo = "/Users/rkrsn/workspace/codellm-devkit/.worktrees/codeanalyzer-schema-iac"
 	// helmOracleVersion is the one renderer the analyzer is compared against.
 	helmOracleVersion = "v4.2.4"
 	// liveConfigName is the untracked typed configuration Artifact the harness
 	// writes into every clone.
 	liveConfigName = ".caniac-live.yaml"
 
-	cloneTimeout    = 5 * time.Minute
-	commandTimeout  = 5 * time.Minute
-	analyzeTimeout  = 10 * time.Minute
-	buildTimeoutSec = 600
+	cloneTimeout   = 5 * time.Minute
+	commandTimeout = 5 * time.Minute
+	analyzeTimeout = 10 * time.Minute
+	buildTimeout   = 10 * time.Minute
 )
 
 //go:embed repositories.json
@@ -496,7 +561,9 @@ func gitLines(ctx context.Context, directory string, args ...string) ([]string, 
 // runCommand is the one subprocess boundary: an explicit argument array, a
 // timeout, captured streams and no interactive credential path.
 func runCommand(ctx context.Context, directory, name string, args ...string) (string, error) {
-	if ctx.Done() == nil {
+	// A test context is cancellable but has no deadline of its own, so every
+	// subprocess that was not given an explicit one gets this boundary's.
+	if _, deadlined := ctx.Deadline(); !deadlined {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, commandTimeout)
 		defer cancel()
@@ -626,20 +693,66 @@ func writeLiveConfig(t *testing.T, clone checkout) string {
 // resourceLine is the canonical comparison record for one rendered resource:
 // its cluster identity and the digest of its normalized document.
 func resourceLine(apiVersion, kind, namespace, name, digest string) string {
-	if kind == "Secret" {
-		// Secret material never leaves either side as text: the analyzer digests
-		// it away, so only the identity and the analyzer's own digest are
-		// comparable. Identity alone is what both sides can agree on.
-		digest = "<secret>"
-	}
 	return strings.Join([]string{apiVersion, kind, namespace, name, digest}, "|")
+}
+
+// normalizedDocument is the oracle's independent reimplementation of the
+// normalization a manifest digest is taken over: the cluster-owned status is
+// dropped, and Secret material is replaced by its digest so that a Secret still
+// compares on content while no plaintext survives on this side either. It
+// mutates and returns the decoded document.
+func normalizedDocument(document map[string]any) map[string]any {
+	delete(document, "status")
+	if kind, _ := document["kind"].(string); kind != "Secret" {
+		return document
+	}
+	// stringData is normalized after data because Kubernetes lets it win.
+	for _, field := range []string{"data", "stringData"} {
+		values, ok := document[field].(map[string]any)
+		if !ok {
+			// Anything else under these fields is unreadable secret material;
+			// dropping it keeps "no plaintext survives" structural.
+			delete(document, field)
+			continue
+		}
+		hashed := make(map[string]any, len(values))
+		for key, value := range values {
+			hashed[key] = secretValueDigest(field, value)
+		}
+		document[field] = hashed
+	}
+	return document
+}
+
+// secretValueDigest hashes decoded `data` bytes and raw `stringData` bytes, and
+// falls back to the canonical JSON encoding for a value that is not a string.
+func secretValueDigest(field string, value any) string {
+	text, ok := value.(string)
+	if !ok {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			encoded = []byte("\x00uncanonical")
+		}
+		return digestBytes(encoded)
+	}
+	if field == "data" {
+		if decoded, err := base64.StdEncoding.DecodeString(text); err == nil {
+			return digestBytes(decoded)
+		}
+	}
+	return digestBytes([]byte(text))
+}
+
+func digestBytes(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
 }
 
 // helmOracleResources renders one profile with the Helm CLI and returns the
 // canonical comparison records. The digest is recomputed here from the rendered
 // document rather than taken from the analyzer, so the two sides are
-// independent: parse the document, drop the cluster-owned status, and hash the
-// canonical JSON encoding.
+// independent: parse the document, normalize it the way a manifest digest
+// requires, and hash the canonical JSON encoding.
 func helmOracleResources(t *testing.T, clone checkout, profile renderProfile) []string {
 	t.Helper()
 	chartDir := filepath.Join(clone.Dir, filepath.FromSlash(clone.Repo.Chart))
@@ -666,14 +779,12 @@ func helmOracleResources(t *testing.T, clone checkout, profile renderProfile) []
 		if len(document) == 0 || object.GetAPIVersion() == "" || object.GetKind() == "" || name == "" {
 			continue
 		}
-		delete(document, "status")
-		encoded, err := json.Marshal(document)
+		apiVersion, kind, namespace := object.GetAPIVersion(), object.GetKind(), object.GetNamespace()
+		encoded, err := json.Marshal(normalizedDocument(document))
 		if err != nil {
 			t.Fatalf("%s/%s: canonicalize oracle document: %v", clone.Repo.Name, profile.Name, err)
 		}
-		sum := sha256.Sum256(encoded)
-		lines = append(lines, resourceLine(object.GetAPIVersion(), object.GetKind(),
-			object.GetNamespace(), name, hex.EncodeToString(sum[:])))
+		lines = append(lines, resourceLine(apiVersion, kind, namespace, name, digestBytes(encoded)))
 	}
 	sort.Strings(lines)
 	return lines
@@ -692,7 +803,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	analyzerBinary = filepath.Join(root, "caniac")
-	ctx, cancel := context.WithTimeout(context.Background(), buildTimeoutSec*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 	if _, err := runCommand(ctx, "../..", "go", "build", "-o", analyzerBinary, "./cmd/codeanalyzer-iac"); err != nil {
 		cancel()
 		os.RemoveAll(root)
