@@ -17,9 +17,13 @@ import (
 // Plan is one generation's complete intent. Everything it removes is scoped to
 // the selected application and to facts this analyzer produced.
 type Plan struct {
-	UpsertNodes           []neo4jemit.NodeRow
-	UpsertEdges           []neo4jemit.EdgeRow
-	DeleteOwnedNodeIDs    []string
+	UpsertNodes        []neo4jemit.NodeRow
+	UpsertEdges        []neo4jemit.EdgeRow
+	DeleteOwnedNodeIDs []string
+	// DeleteOwnedNodeLabels carries the labels each deleted node was actually
+	// observed with, so the write boundary can re-prove the node is wholly this
+	// analyzer's rather than trusting an ID it cannot classify.
+	DeleteOwnedNodeLabels map[string][]string
 	DeleteOwnedEdges      []neo4jemit.EdgeRow
 	RemoveFacetLabels     map[string][]string
 	RemoveFacetProperties map[string][]string
@@ -70,6 +74,7 @@ func BuildPlan(rows neo4jemit.GraphRows, existing ExistingState, eager bool) (Pl
 	}
 
 	ours := map[string]bool{}
+	deletedLabels := map[string][]string{}
 	removeLabels := map[string][]string{}
 	removeProperties := map[string][]string{}
 	for _, node := range existing.Nodes {
@@ -81,6 +86,7 @@ func BuildPlan(rows neo4jemit.GraphRows, existing ExistingState, eager bool) (Pl
 		if wholeNode {
 			if _, kept := desired[node.ID]; !kept {
 				plan.DeleteOwnedNodeIDs = append(plan.DeleteOwnedNodeIDs, node.ID)
+				deletedLabels[node.ID] = node.Labels
 			}
 			continue
 		}
@@ -112,6 +118,9 @@ func BuildPlan(rows neo4jemit.GraphRows, existing ExistingState, eager bool) (Pl
 		}
 		return left.Dst < right.Dst
 	})
+	if len(deletedLabels) > 0 {
+		plan.DeleteOwnedNodeLabels = deletedLabels
+	}
 	if len(removeLabels) > 0 {
 		plan.RemoveFacetLabels = removeLabels
 	}

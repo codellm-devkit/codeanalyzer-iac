@@ -102,6 +102,11 @@ func TestEagerRemovesOnlyStaleProducerOwnedFacts(t *testing.T) {
 	if diff := cmp.Diff([]string{staleRender}, plan.DeleteOwnedNodeIDs); diff != "" {
 		t.Errorf("deleted nodes (-want +got):\n%s", diff)
 	}
+	// The observed labels travel with the plan so the write boundary can
+	// re-prove the deletion instead of trusting an ID it cannot classify.
+	if diff := cmp.Diff(map[string][]string{staleRender: {"HelmRender"}}, plan.DeleteOwnedNodeLabels); diff != "" {
+		t.Errorf("deleted node labels (-want +got):\n%s", diff)
+	}
 	wantEdges := []neo4jemit.EdgeRow{{Type: "IAC_HAS_RENDER", Src: chartID, Dst: staleRender}}
 	if diff := cmp.Diff(wantEdges, plan.DeleteOwnedEdges); diff != "" {
 		t.Errorf("deleted edges (-want +got):\n%s", diff)

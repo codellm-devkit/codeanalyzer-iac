@@ -80,11 +80,36 @@ func TestGuardLeavesTheConflictingTargetUntouched(t *testing.T) {
 	}
 }
 
+// TestApplyRefusesToDeleteImmutableNodes deletes a node and removes nothing, so
+// only the node-deletion guard can be what refuses the plan.
 func TestApplyRefusesToDeleteImmutableNodes(t *testing.T) {
-	plan := Plan{DeleteOwnedNodeIDs: []string{chartID}, RemoveFacetLabels: map[string][]string{chartID: {"Artifact"}}}
+	plan := Plan{
+		DeleteOwnedNodeIDs:    []string{chartID},
+		DeleteOwnedNodeLabels: map[string][]string{chartID: {"Artifact", "HelmChart", "TSModule"}},
+	}
 	err := Apply(context.Background(), &recordingStore{}, plan)
-	if err == nil || !strings.Contains(err.Error(), "Artifact") {
-		t.Fatalf("err = %v, want a refusal naming the immutable label", err)
+	if err == nil || !strings.Contains(err.Error(), chartID) {
+		t.Fatalf("err = %v, want a refusal naming the shared node", err)
+	}
+}
+
+// TestApplyRefusesToDeleteANodeItCannotProveItOwns closes the hole the labels
+// map would otherwise leave: a plan that names an ID and nothing else cannot be
+// shown to be safe, so it is refused rather than trusted.
+func TestApplyRefusesToDeleteANodeItCannotProveItOwns(t *testing.T) {
+	plan := Plan{DeleteOwnedNodeIDs: []string{chartID}}
+	if err := Apply(context.Background(), &recordingStore{}, plan); err == nil {
+		t.Fatal("a deletion with no observed labels cannot be proved safe and must be refused")
+	}
+}
+
+func TestApplyAcceptsDeletingAWhollyOwnedNode(t *testing.T) {
+	plan := Plan{
+		DeleteOwnedNodeIDs:    []string{staleRender},
+		DeleteOwnedNodeLabels: map[string][]string{staleRender: {"HelmRender"}},
+	}
+	if err := Apply(context.Background(), &recordingStore{}, plan); err != nil {
+		t.Fatalf("err = %v, want a node this analyzer created in full to be deletable", err)
 	}
 }
 
@@ -183,10 +208,8 @@ func TestEagerNeverPlansAVocabularyItDidNotWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range plan.RemoveFacetProperties[chartID] {
-		if name != "helm_name" {
-			t.Errorf("property %q was planned for removal; only catalog-shaped names may be", name)
-		}
+	if names := plan.RemoveFacetProperties[chartID]; len(names) != 0 {
+		t.Errorf("properties %v were planned for removal; every desired and every foreign-shaped name must be left alone", names)
 	}
 	if len(plan.DeleteOwnedEdges) != 0 {
 		t.Errorf("edges %+v were planned for deletion; none is a catalog relationship", plan.DeleteOwnedEdges)

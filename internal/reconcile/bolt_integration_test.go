@@ -100,6 +100,41 @@ func TestBoltIntegration(t *testing.T) {
 		}
 	})
 
+	// A constraint the graph refuses to create is what makes MERGE-by-id
+	// idempotent, so the generation must fail loudly rather than proceed
+	// without it. Duplicate ids on a constrained label are how a shared graph
+	// actually produces this.
+	t.Run("a constraint failure stops the generation before any data is written", func(t *testing.T) {
+		const constraintName = "helm_lookup_reference_id"
+		duplicate := appID + "/lookup/duplicate"
+		execute(t, store, "DROP CONSTRAINT "+constraintName+" IF EXISTS", nil)
+		t.Cleanup(func() {
+			execute(t, store, "MATCH (n:HelmLookupReference {id: $id}) DETACH DELETE n", map[string]any{"id": duplicate})
+			execute(t, store, "CREATE CONSTRAINT "+constraintName+" IF NOT EXISTS FOR (n:HelmLookupReference) REQUIRE n.id IS UNIQUE", nil)
+		})
+		execute(t, store, `CREATE (:HelmLookupReference {id: $id, iac_app_id: $app})
+CREATE (:HelmLookupReference {id: $id, iac_app_id: $app})`, map[string]any{"id": duplicate, "app": appID})
+
+		// A second, never-written application proves nothing was committed.
+		blocked := app + "-blocked"
+		blockedAppID := "can://iac/" + blocked
+		blockedChartID := "can://artifact/" + blocked + "/charts/api/Chart.yaml"
+		t.Cleanup(func() { wipeApplication(t, store, blockedAppID) })
+
+		plan, err := BuildPlan(integrationRows(blocked), ExistingState{}, false)
+		if err != nil {
+			t.Fatalf("build plan: %v", err)
+		}
+		if err := Apply(context.Background(), store, plan); err == nil {
+			t.Fatal("a constraint that cannot be created must fail the generation")
+		} else {
+			t.Logf("constraint failure surfaced as: %v", err)
+		}
+		if node := readNode(t, store, blockedChartID); node.ID != "" {
+			t.Error("data was written even though a required constraint could not be created")
+		}
+	})
+
 	t.Run("a failed generation rolls back every change", func(t *testing.T) {
 		before := readExisting(t, store, appID)
 		poisoned := Plan{UpsertNodes: append(append([]neo4jemit.NodeRow{}, fixture.Nodes...),
@@ -252,7 +287,11 @@ func execute(t *testing.T, store *BoltStore, query string, parameters map[string
 	ctx := context.Background()
 	session := store.session(ctx, neo4j.AccessModeWrite)
 	defer session.Close(ctx)
-	if _, err := session.Run(ctx, query, parameters); err != nil {
+	result, err := session.Run(ctx, query, parameters)
+	if err != nil {
+		t.Fatalf("run test setup query: %v", err)
+	}
+	if _, err := result.Consume(ctx); err != nil {
 		t.Fatalf("run test setup query: %v", err)
 	}
 }

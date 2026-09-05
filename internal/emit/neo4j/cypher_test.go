@@ -75,10 +75,35 @@ func TestCypherUsesOnlyCatalogLabelsAndRelationshipTypes(t *testing.T) {
 	}
 }
 
-func TestCypherNeverCarriesSecretPlaintext(t *testing.T) {
-	if strings.Contains(string(renderFixtureCypher(t)), secretPlaintextCanary) {
-		t.Fatal("secret plaintext reached the generated Cypher")
+// TestCypherCarriesSecretDigestsAndNoExtraPlaintext allows the canary exactly
+// once — inside the escaped source literal of the artifact that contains it —
+// and requires the rendered Secret to be represented by its digest.
+func TestCypherCarriesSecretDigestsAndNoExtraPlaintext(t *testing.T) {
+	script := string(renderFixtureCypher(t))
+	if got := strings.Count(script, secretPlaintextCanary); got != 1 {
+		t.Fatalf("the secret value appears %d times in the script, want only the analysed source literal", got)
 	}
+	line := lineContaining(t, script, secretPlaintextCanary)
+	if !strings.HasPrefix(line, ":param nodes_Artifact_HelmArtifact_HelmTemplate_IaCArtifact ") {
+		t.Fatalf("the secret value appears outside the template artifact's parameter block: %.80s", line)
+	}
+	if !strings.Contains(line, "source: '") {
+		t.Fatal("the secret value is not inside a source string literal")
+	}
+	if !strings.Contains(script, digestOf(secretPlaintextCanary)) {
+		t.Error("the rendered Secret's digest is missing from the script")
+	}
+}
+
+func lineContaining(t *testing.T, script, want string) string {
+	t.Helper()
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, want) {
+			return line
+		}
+	}
+	t.Fatalf("no line contains %q", want)
+	return ""
 }
 
 func TestCypherCreatesEveryCatalogConstraint(t *testing.T) {

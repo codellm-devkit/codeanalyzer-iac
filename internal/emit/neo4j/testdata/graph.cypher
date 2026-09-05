@@ -82,7 +82,7 @@ SET n:HelmArtifact:HelmRequirements:IaCArtifact
 SET n += row.owned
 ;
 
-:param nodes_Artifact_HelmArtifact_HelmTemplate_IaCArtifact => [{id: 'can://artifact/payments/charts/api/templates/deployment.yaml', neutral: {format: 'yaml', id: 'can://artifact/payments/charts/api/templates/deployment.yaml', path: 'charts/api/templates/deployment.yaml', sha256: '34dd55c8d8303c02bf25dfd7efa696cf0950901815cb62048f53d4474025f8e6', size_bytes: 72, source: 'kind: Deployment # it\'s "quoted" `backticked` $dollar \\ ünïcödé ☃\n'}, owned: {helm_roles: ['template'], iac_analyzer_version: 'dev', iac_app_id: 'can://iac/payments', iac_dialect: 'helm', iac_kind: 'helm_template', iac_producer: 'codeanalyzer-iac', iac_status: 'complete'}}];
+:param nodes_Artifact_HelmArtifact_HelmTemplate_IaCArtifact => [{id: 'can://artifact/payments/charts/api/templates/deployment.yaml', neutral: {format: 'yaml', id: 'can://artifact/payments/charts/api/templates/deployment.yaml', path: 'charts/api/templates/deployment.yaml', sha256: 'ff55b6d75535a5a3babf3e7bb89fbc657e461cc4f79bf7ea91af52b62cc49e22', size_bytes: 114, source: 'kind: Deployment # it\'s "quoted" `backticked` $dollar \\ ünïcödé ☃\ndata:\n  password: s3cr3t-plaintext-canary\n'}, owned: {helm_roles: ['template'], iac_analyzer_version: 'dev', iac_app_id: 'can://iac/payments', iac_dialect: 'helm', iac_kind: 'helm_template', iac_producer: 'codeanalyzer-iac', iac_status: 'complete'}}];
 UNWIND $nodes_Artifact_HelmArtifact_HelmTemplate_IaCArtifact AS row
 MERGE (n:Artifact {id: row.id})
 ON CREATE SET n += row.neutral
@@ -139,19 +139,19 @@ SET n:HelmDiagnostic
 SET n += row.owned
 ;
 
-:param nodes_HelmLookupReference => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/lookup-reference@1:3', neutral: {}, owned: {analyzer_version: 'dev', group_expression: '', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/lookup-reference@1:3', name_expression: 'api', namespace_expression: '.Release.Namespace', producer: 'codeanalyzer-iac', resource_kind_expression: 'Secret', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,72]}', version_expression: 'v1'}}];
+:param nodes_HelmLookupReference => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/lookup-reference@1:3', neutral: {}, owned: {analyzer_version: 'dev', group_expression: '', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/lookup-reference@1:3', name_expression: 'api', namespace_expression: '.Release.Namespace', producer: 'codeanalyzer-iac', resource_kind_expression: 'Secret', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,114]}', version_expression: 'v1'}}];
 UNWIND $nodes_HelmLookupReference AS row
 MERGE (n:HelmLookupReference {id: row.id})
 SET n += row.owned
 ;
 
-:param nodes_HelmNamedTemplate => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/named-template/api.fullname', neutral: {}, owned: {analyzer_version: 'dev', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/named-template/api.fullname', name: 'api.fullname', producer: 'codeanalyzer-iac', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,72]}'}}];
+:param nodes_HelmNamedTemplate => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/named-template/api.fullname', neutral: {}, owned: {analyzer_version: 'dev', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/named-template/api.fullname', name: 'api.fullname', producer: 'codeanalyzer-iac', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,114]}'}}];
 UNWIND $nodes_HelmNamedTemplate AS row
 MERGE (n:HelmNamedTemplate {id: row.id})
 SET n += row.owned
 ;
 
-:param nodes_HelmRender => [{id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d', neutral: {}, owned: {analyzer_version: 'dev', effective_values_sha256: '46e0876178516073c5ae0fb62d07c070fe57249cbad44068272a7ad9373143ab', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d', phase: 'render', producer: 'codeanalyzer-iac', profile_id: 'can://iac/payments/config/profile/production', renderer_name: 'helm', renderer_version: '4.2.4', status: 'succeeded', value_layer_ids: ['can://iac/payments/config/profile/production/value-layer/0000', 'can://iac/payments/config/profile/production/value-layer/0001']}}];
+:param nodes_HelmRender => [{id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d', neutral: {}, owned: {analyzer_version: 'dev', effective_values_sha256: '46e0876178516073c5ae0fb62d07c070fe57249cbad44068272a7ad9373143ab', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d', phase: 'template', producer: 'codeanalyzer-iac', profile_id: 'can://iac/payments/config/profile/production', renderer_name: 'helm', renderer_version: '4.2.4', status: 'succeeded', value_layer_ids: ['can://iac/payments/config/profile/production/value-layer/0000', 'can://iac/payments/config/profile/production/value-layer/0001']}}];
 UNWIND $nodes_HelmRender AS row
 MERGE (n:HelmRender {id: row.id})
 SET n += row.owned
@@ -163,13 +163,13 @@ MERGE (n:HelmRenderProfile {id: row.id})
 SET n += row.owned
 ;
 
-:param nodes_HelmResourceTemplate => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/resource-template@1:1', neutral: {}, owned: {analyzer_version: 'dev', document_index: 0, iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/resource-template@1:1', producer: 'codeanalyzer-iac', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,72]}'}}];
+:param nodes_HelmResourceTemplate => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/resource-template@1:1', neutral: {}, owned: {analyzer_version: 'dev', document_index: 0, iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/resource-template@1:1', producer: 'codeanalyzer-iac', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,114]}'}}];
 UNWIND $nodes_HelmResourceTemplate AS row
 MERGE (n:HelmResourceTemplate {id: row.id})
 SET n += row.owned
 ;
 
-:param nodes_HelmTemplateCall => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/template-call@1:1', neutral: {}, owned: {analyzer_version: 'dev', call_kind: 'include', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/template-call@1:1', name_expression: 'api.fullname', producer: 'codeanalyzer-iac', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,72]}', target_id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/named-template/api.fullname'}}];
+:param nodes_HelmTemplateCall => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/template-call@1:1', neutral: {}, owned: {analyzer_version: 'dev', call_kind: 'include', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/template-call@1:1', name_expression: 'api.fullname', producer: 'codeanalyzer-iac', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,114]}', target_id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/named-template/api.fullname'}}];
 UNWIND $nodes_HelmTemplateCall AS row
 MERGE (n:HelmTemplateCall {id: row.id})
 SET n += row.owned
@@ -181,7 +181,7 @@ MERGE (n:HelmValueLayer {id: row.id})
 SET n += row.owned
 ;
 
-:param nodes_HelmValueReference => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/value-reference@1:2', neutral: {}, owned: {analyzer_version: 'dev', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/value-reference@1:2', path_expression: 'image.tag', producer: 'codeanalyzer-iac', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,72]}', target_id: 'can://artifact/payments/charts/api/values.yaml@key/image.tag'}}];
+:param nodes_HelmValueReference => [{id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/value-reference@1:2', neutral: {}, owned: {analyzer_version: 'dev', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/value-reference@1:2', path_expression: 'image.tag', producer: 'codeanalyzer-iac', span_json: '{"start":[1,1],"end":[1,2],"bytes":[0,114]}', target_id: 'can://artifact/payments/charts/api/values.yaml@key/image.tag'}}];
 UNWIND $nodes_HelmValueReference AS row
 MERGE (n:HelmValueReference {id: row.id})
 SET n += row.owned
@@ -194,7 +194,7 @@ SET n:IaCAlias
 SET n += row.owned
 ;
 
-:param nodes_KubernetesResource => [{id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d/kubernetes/core/Secret/prod/api', neutral: {}, owned: {address_id: 'can://iac/payments/kubernetes/core/Secret/prod/api', analyzer_version: 'dev', annotations_json: '{"checksum/config":"deadbeef"}', api_version: 'v1', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d/kubernetes/core/Secret/prod/api', labels_json: '{"app":"api","tier":"backend"}', manifest_sha256: '05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f', name: 'api', namespace: 'prod', origin_ids: ['can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/resource-template@1:1'], plural: 'secrets', producer: 'codeanalyzer-iac', render_id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d', resource_kind: 'Secret', secret_data_json: '{"password":{"key":"password","sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}'}}];
+:param nodes_KubernetesResource => [{id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d/kubernetes/core/Secret/prod/api', neutral: {}, owned: {address_id: 'can://iac/payments/kubernetes/core/Secret/prod/api', analyzer_version: 'dev', annotations_json: '{"checksum/config":"deadbeef"}', api_version: 'v1', iac_app_id: 'can://iac/payments', id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d/kubernetes/core/Secret/prod/api', labels_json: '{"app":"api","tier":"backend"}', manifest_sha256: '05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f', name: 'api', namespace: 'prod', origin_ids: ['can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/resource-template@1:1'], plural: 'secrets', producer: 'codeanalyzer-iac', render_id: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d', resource_kind: 'Secret', secret_data_json: '{"password":{"key":"password","sha256":"7db87fcfd1e97ab8af46cc9525640e0bc70d3b6ce007c175872a6830c8bc1301"}}'}}];
 UNWIND $nodes_KubernetesResource AS row
 MERGE (n:KubernetesResource {id: row.id})
 SET n += row.owned

@@ -224,7 +224,7 @@ func TestStructuredValuesBecomeDeterministicJSONStrings(t *testing.T) {
 	for name, want := range map[string]string{
 		"labels_json":      `{"app":"api","tier":"backend"}`,
 		"annotations_json": `{"checksum/config":"deadbeef"}`,
-		"secret_data_json": `{"password":{"key":"password","sha256":"` + digestOf("") + `"}}`,
+		"secret_data_json": `{"password":{"key":"password","sha256":"` + digestOf(secretPlaintextCanary) + `"}}`,
 	} {
 		if got := resource.Properties[name]; got != any(want) {
 			t.Errorf("%s = %v, want %v", name, got, want)
@@ -236,18 +236,34 @@ func TestStructuredValuesBecomeDeterministicJSONStrings(t *testing.T) {
 	}
 }
 
-func TestSecretPlaintextNeverReachesProperties(t *testing.T) {
-	analysis := fullFixtureAnalysis()
-	rows, err := Project(analysis)
+// TestSecretPlaintextOnlyEverAppearsAsAnalyzedSource pins the one place a
+// Secret value may legitimately be: the neutral source of the artifact that
+// literally contains it. Every derived property must carry the digest instead.
+func TestSecretPlaintextOnlyEverAppearsAsAnalyzedSource(t *testing.T) {
+	const templateID = "can://artifact/payments/charts/api/templates/deployment.yaml"
+	rows, err := Project(fullFixtureAnalysis())
 	if err != nil {
 		t.Fatal(err)
 	}
+	carriers := map[string]bool{}
 	for _, node := range rows.Nodes {
 		for name, value := range node.Properties {
 			if text, ok := value.(string); ok && strings.Contains(text, secretPlaintextCanary) {
-				t.Fatalf("secret plaintext leaked into %s.%s", node.ID, name)
+				carriers[node.ID+"."+name] = true
 			}
 		}
+	}
+	if diff := cmp.Diff(map[string]bool{templateID + ".source": true}, carriers); diff != "" {
+		t.Errorf("secret plaintext reached properties it may not (-want +got):\n%s", diff)
+	}
+	// The fixture must actually feed the canary in, or the check above is
+	// searching for a string that was never there.
+	if !strings.Contains(rows.Node(templateID).Properties["source"].(string), secretPlaintextCanary) {
+		t.Fatal("the fixture does not analyse the secret value; this test proves nothing")
+	}
+	resource := rows.Node("can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d/kubernetes/core/Secret/prod/api")
+	if !strings.Contains(resource.Properties["secret_data_json"].(string), digestOf(secretPlaintextCanary)) {
+		t.Error("the rendered Secret does not carry the value's digest")
 	}
 }
 
@@ -410,8 +426,11 @@ func spanJSONOf(size int) string {
 	return `{"start":[1,1],"end":[1,2],"bytes":[0,` + strconv.Itoa(size) + `]}`
 }
 
-// secretPlaintextCanary is the value a Kubernetes Secret would carry if the
-// model ever kept plaintext. It exists only so tests can prove it does not.
+// secretPlaintextCanary is a Secret value that really is present in the
+// analyzed text: it is written into the template artifact's source below, and
+// the rendered Secret's datum carries its digest. A projector that ever routed
+// a Secret value into a derived property would therefore carry this string, so
+// the tests that look for it are looking for something the fixture feeds in.
 const secretPlaintextCanary = "s3cr3t-plaintext-canary"
 
 const fixtureApp = "payments"
@@ -419,7 +438,8 @@ const fixtureApp = "payments"
 // hostileSource exercises every character class that could break a Cypher
 // literal: single quotes, double quotes, backticks, a dollar sign, a backslash
 // and non-ASCII text.
-const hostileSource = "kind: Deployment # it's \"quoted\" `backticked` $dollar \\ ünïcödé ☃\n"
+const hostileSource = "kind: Deployment # it's \"quoted\" `backticked` $dollar \\ ünïcödé ☃\n" +
+	"data:\n  password: " + secretPlaintextCanary + "\n"
 
 // fullFixtureAnalysis is a hand-built L3 model that exercises every catalog
 // label and every relationship family in spec section 5. It is validated
@@ -508,7 +528,7 @@ func fullFixtureAnalysis() *model.Analysis {
 	productionProfile.ValueLayers = map[string]*model.HelmValueLayer{fileLayer.ID: fileLayer, keyLayer.ID: keyLayer}
 
 	render := &model.HelmRender{
-		ID: chartBase + "/render/production@f00d", Kind: "helm_render", Status: "succeeded", Phase: "render",
+		ID: chartBase + "/render/production@f00d", Kind: "helm_render", Status: "succeeded", Phase: "template",
 		ProfileID: productionProfile.ID, RendererName: "helm", RendererVersion: "4.2.4",
 		ValueLayerIDs: []string{fileLayer.ID, keyLayer.ID}, EffectiveValuesSHA256: digestOf("effective"),
 	}
@@ -518,7 +538,7 @@ func fullFixtureAnalysis() *model.Analysis {
 		OriginIDs: []string{resourceTemplate.ID}, Namespace: "prod", Name: "api",
 		Labels: map[string]string{"app": "api", "tier": "backend"}, Annotations: map[string]string{"checksum/config": "deadbeef"},
 		Plural: "secrets", AddressID: address.ID,
-		SecretData: map[string]model.KubernetesSecretDatum{"password": {Key: "password", SHA256: digestOf("")}},
+		SecretData: map[string]model.KubernetesSecretDatum{"password": {Key: "password", SHA256: digestOf(secretPlaintextCanary)}},
 	}
 	renderDiagnostic := &model.Diagnostic{
 		ID: render.ID + "/diagnostic/IAC_HELM_RENDER_PARTIAL", Kind: "diagnostic", Severity: "warning",

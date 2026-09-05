@@ -112,11 +112,21 @@ func applicationNameOf(artifactID string) (string, error) {
 	return name, nil
 }
 
-// guardPlan is the deletion contract stated once, at the write boundary: an
+// guardPlan is the deletion contract stated once, at the write boundary: a node
+// is deleted only when its own labels prove this analyzer created all of it, an
 // Artifact, ConfigKey, Package or Application label is never removed, a neutral
 // or foreign property is never removed, and a shared relationship is never
 // deleted.
 func guardPlan(plan Plan) error {
+	for _, id := range plan.DeleteOwnedNodeIDs {
+		labels, observed := plan.DeleteOwnedNodeLabels[id]
+		if !observed {
+			return fmt.Errorf("refusing to delete %s: the plan carries no observed labels to prove %s created it", id, neo4jemit.ProducerName)
+		}
+		if _, wholeNode := neo4jemit.OwnedLabels(labels); !wholeNode {
+			return fmt.Errorf("refusing to delete %s: labels %v are not all owned by %s", id, labels, neo4jemit.ProducerName)
+		}
+	}
 	for _, id := range sortedKeys(plan.RemoveFacetLabels) {
 		for _, label := range plan.RemoveFacetLabels[id] {
 			if removable, _ := neo4jemit.OwnedLabels([]string{label}); len(removable) == 0 {

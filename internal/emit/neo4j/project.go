@@ -204,31 +204,31 @@ func (p *projector) facet(artifact *model.Artifact) {
 		}
 	case *model.HelmRequirements:
 		properties["iac_status"] = typed.Status
-		properties["helm_roles"] = typed.Roles
+		properties["helm_roles"] = stringList(typed.Roles)
 		for _, name := range sortedKeys(typed.Dependencies) {
 			p.dependency(typed.Dependencies[name])
 		}
 	case *model.HelmLock:
 		properties["iac_status"] = typed.Status
-		properties["helm_roles"] = typed.Roles
+		properties["helm_roles"] = stringList(typed.Roles)
 		for _, name := range sortedKeys(typed.Dependencies) {
 			p.dependency(typed.Dependencies[name])
 		}
 	case *model.HelmValues:
 		properties["iac_status"] = typed.Status
-		properties["helm_roles"] = typed.Roles
+		properties["helm_roles"] = stringList(typed.Roles)
 	case *model.HelmValuesSchema:
 		properties["iac_status"] = typed.Status
-		properties["helm_roles"] = typed.Roles
+		properties["helm_roles"] = stringList(typed.Roles)
 	case *model.HelmCRD:
 		properties["iac_status"] = typed.Status
-		properties["helm_roles"] = typed.Roles
+		properties["helm_roles"] = stringList(typed.Roles)
 	case *model.HelmIgnore:
 		properties["iac_status"] = typed.Status
-		properties["helm_roles"] = typed.Roles
+		properties["helm_roles"] = stringList(typed.Roles)
 	case *model.HelmTemplate:
 		properties["iac_status"] = typed.Status
-		properties["helm_roles"] = typed.Roles
+		properties["helm_roles"] = stringList(typed.Roles)
 		for _, name := range sortedKeys(typed.NamedTemplates) {
 			node := typed.NamedTemplates[name]
 			p.builder.node(node.ID, []string{"HelmNamedTemplate"}, p.own(map[string]any{
