@@ -1,0 +1,123 @@
+name: live
+
+# The live gate analyzes two public Helm repositories and compares the result
+# with Helm 4.2.4 itself. It needs a network, so it is build-tagged `live` and
+# never runs as part of the ordinary, network-independent unit tests.
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly moving-head drift lane.
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  HELM_VERSION: v4.2.4
+  SCHEMA_REPOSITORY: codellm-devkit/codeanalyzer-schema
+  SCHEMA_COMMIT: e127901f8ee072d44888f769b35fd5353393c3a3
+
+jobs:
+  pinned:
+    name: pinned revisions
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    services:
+      neo4j:
+        image: neo4j:5
+        env:
+          NEO4J_AUTH: neo4j/test-password
+        ports:
+          - 7687:7687
+          - 7474:7474
+        options: >-
+          --health-cmd "wget --quiet --tries=1 --spider http://localhost:7474 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Check out the accepted schema contract
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SCHEMA_REPOSITORY }}
+          ref: ${{ env.SCHEMA_COMMIT }}
+          path: .schema
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Require the pinned Helm oracle
+        run: |
+          installed="$(helm version --short)"
+          echo "helm: ${installed}"
+          case "${installed}" in
+            ${HELM_VERSION}|${HELM_VERSION}+*) ;;
+            *) echo "helm oracle must be ${HELM_VERSION}" >&2; exit 1 ;;
+          esac
+      - name: Run the pinned live acceptance gate
+        env:
+          CANIAC_SCHEMA_REPO: ${{ github.workspace }}/.schema
+          NEO4J_TEST_URI: neo4j://localhost:7687
+          NEO4J_TEST_USERNAME: neo4j
+          NEO4J_TEST_PASSWORD: test-password
+        run: make test-live
+
+  head:
+    name: moving head
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    services:
+      neo4j:
+        image: neo4j:5
+        env:
+          NEO4J_AUTH: neo4j/test-password
+        ports:
+          - 7687:7687
+          - 7474:7474
+        options: >-
+          --health-cmd "wget --quiet --tries=1 --spider http://localhost:7474 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Check out the accepted schema contract
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SCHEMA_REPOSITORY }}
+          ref: ${{ env.SCHEMA_COMMIT }}
+          path: .schema
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Require the pinned Helm oracle
+        run: |
+          installed="$(helm version --short)"
+          echo "helm: ${installed}"
+          case "${installed}" in
+            ${HELM_VERSION}|${HELM_VERSION}+*) ;;
+            *) echo "helm oracle must be ${HELM_VERSION}" >&2; exit 1 ;;
+          esac
+      # The drift lane reports the resolved commits and fails on any semantic
+      # difference. It never commits or uploads a regenerated expectation: a
+      # pin or an assertion is only ever changed by a reviewed pull request.
+      - name: Run the moving-head drift lane
+        env:
+          CANIAC_SCHEMA_REPO: ${{ github.workspace }}/.schema
+          NEO4J_TEST_URI: neo4j://localhost:7687
+          NEO4J_TEST_USERNAME: neo4j
+          NEO4J_TEST_PASSWORD: test-password
+        run: make test-live-head
