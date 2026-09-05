@@ -132,6 +132,36 @@ func TestUnaddressableConfigSelectorIsRejected(t *testing.T) {
 		"--app-name", "payments", "--config", "../outside.yaml", ".")
 }
 
+// TestInvalidConfigurationFailsWithAnInspectableDocument is the other invalid
+// `--config`: the selector addresses a real artifact, but the document it names
+// cannot be rendered as declared. The analyzer publishes the partial analysis,
+// declares no profile, and then fails — without --strict.
+func TestInvalidConfigurationFailsWithAnInspectableDocument(t *testing.T) {
+	root := fixtureCopy(t, "profiles")
+	if err := os.WriteFile(filepath.Join(root, ".codeanalyzer-iac.yaml"),
+		[]byte("version: 1\nrenders:\n  - name: broken\n    chart: Chart.yaml\n    valuez:\n      - values.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := run(t, root, ".", "--app-name", "payments",
+		"--config", ".codeanalyzer-iac.yaml", "--analysis-level", "3")
+	if err == nil {
+		t.Fatal("an invalid configuration document must fail the analyzer without --strict")
+	}
+	if !strings.Contains(stderr, "configuration is invalid") {
+		t.Errorf("stderr = %q, want the configuration failure", stderr)
+	}
+	decodeAnalysis(t, stdout)
+	if !strings.Contains(stdout, "IAC_HELM_INVALID_CONFIG") {
+		t.Error("the published analysis carries no configuration diagnostic")
+	}
+	// An invalid configuration declares nothing: the chart keeps only its own
+	// synthetic default profile, and no configured profile is rendered.
+	if strings.Contains(stdout, `"name":"broken"`) || strings.Contains(stdout, `"origin":"config"`) {
+		t.Error("an invalid configuration produced profile facts")
+	}
+}
+
 func TestMsgpackOutputIsRejected(t *testing.T) {
 	assertRejected(t, "msgpack output is not yet implemented", "--app-name", "payments", "--format", "msgpack", ".")
 }

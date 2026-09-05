@@ -70,36 +70,67 @@ func FuzzHelmValuesSchemaNeverPanics(f *testing.F) {
 // documents do, no plaintext from that Secret may survive sanitization into any
 // decoded resource property.
 func FuzzRenderedDocumentsNeverPanic(f *testing.F) {
-	seed(f, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: fuzz\ndata:\n  a: b\n",
-		"l1-v2/crds/widgets.yaml", "l1-v2/templates/hook.yaml", "render-failures/templates/bad.yaml")
+	seed(f, renderedDocumentLiteral, renderedDocumentFixtures...)
 	f.Fuzz(func(t *testing.T, source []byte) {
-		rendered := string(source) + "\n---\n" + canarySecretDocument
-		documents, _, err := decodeDocuments(t.Context(), rendered)
-		if err != nil {
-			t.Fatalf("decodeDocuments() error = %v", err)
-		}
-		// The fuzzer is free to write the canary itself; only material this
-		// target introduced through the Secret is a leak.
-		injected := strings.Contains(string(source), canaryPlaintext) ||
-			strings.Contains(string(source), canaryEncoded) ||
-			strings.Contains(string(source), canaryStringData)
-		for _, document := range documents {
-			sanitized, secretData := sanitizeResource(document.Object)
-			encoded, err := json.Marshal(map[string]any{"resource": sanitized, "secret_data": secretData})
-			if err != nil {
-				// A decoded document is JSON-shaped by construction.
-				t.Fatalf("marshal sanitized document %d: %v", document.Ordinal, err)
-			}
-			if injected {
-				continue
-			}
-			for _, secret := range []string{canaryPlaintext, canaryEncoded, canaryStringData} {
-				if strings.Contains(string(encoded), secret) {
-					t.Fatalf("document %d retained Secret material %q", document.Ordinal, secret)
-				}
-			}
-		}
+		decodeWithCanarySecret(t, source)
 	})
+}
+
+// TestRenderedDocumentFuzzSeedsDecodeTheCanarySecret keeps the leak check above
+// from being vacuous. An arbitrary fuzz input may make the decoder abandon the
+// stream before it reaches the appended Secret, so the target itself cannot
+// require the canary to decode; every seed must, or the assertion it carries
+// would never have been evaluated against real Secret material.
+func TestRenderedDocumentFuzzSeedsDecodeTheCanarySecret(t *testing.T) {
+	for _, fixture := range seeds(t, renderedDocumentLiteral, renderedDocumentFixtures...) {
+		t.Run(fixture.name, func(t *testing.T) {
+			documents := decodeWithCanarySecret(t, fixture.source)
+			if !decodedTheCanarySecret(documents) {
+				t.Fatalf("the canary Secret did not decode beside %s; the leak assertion is vacuous for this seed", fixture.name)
+			}
+		})
+	}
+}
+
+// decodeWithCanarySecret appends the canary Secret to source, decodes the whole
+// stream and requires that no plaintext survives sanitization. The fuzzer is
+// free to write the canary itself, so only material this helper introduced is
+// treated as a leak.
+func decodeWithCanarySecret(t *testing.T, source []byte) []decodedDocument {
+	t.Helper()
+	documents, _, err := decodeDocuments(t.Context(), string(source)+"\n---\n"+canarySecretDocument)
+	if err != nil {
+		t.Fatalf("decodeDocuments() error = %v", err)
+	}
+	injected := strings.Contains(string(source), canaryPlaintext) ||
+		strings.Contains(string(source), canaryEncoded) ||
+		strings.Contains(string(source), canaryStringData)
+	for _, document := range documents {
+		sanitized, secretData := sanitizeResource(document.Object)
+		encoded, err := json.Marshal(map[string]any{"resource": sanitized, "secret_data": secretData})
+		if err != nil {
+			// A decoded document is JSON-shaped by construction.
+			t.Fatalf("marshal sanitized document %d: %v", document.Ordinal, err)
+		}
+		if injected {
+			continue
+		}
+		for _, secret := range []string{canaryPlaintext, canaryEncoded, canaryStringData} {
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("document %d retained Secret material %q", document.Ordinal, secret)
+			}
+		}
+	}
+	return documents
+}
+
+func decodedTheCanarySecret(documents []decodedDocument) bool {
+	for _, document := range documents {
+		if document.Object.GetKind() == "Secret" && document.Object.GetName() == canarySecretName {
+			return true
+		}
+	}
+	return false
 }
 
 const (
@@ -114,16 +145,39 @@ var canarySecretDocument = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: " +
 	"\ntype: Opaque\ndata:\n  password: " + canaryEncoded +
 	"\nstringData:\n  token: " + canaryStringData + "\n"
 
-// seed adds the literal inputs plus each named testdata file to the corpus.
-func seed(f *testing.F, literal string, fixtures ...string) {
-	f.Helper()
-	f.Add([]byte(literal))
+// The rendered-document corpus is named so the seed test can replay exactly
+// what the fuzz target starts from.
+const renderedDocumentLiteral = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: fuzz\ndata:\n  a: b\n"
+
+var renderedDocumentFixtures = []string{
+	"l1-v2/crds/widgets.yaml", "l1-v2/templates/hook.yaml", "render-failures/templates/bad.yaml",
+}
+
+// fuzzSeed is one corpus entry under the name it can be reported by.
+type fuzzSeed struct {
+	name   string
+	source []byte
+}
+
+// seeds reads the literal plus each named testdata file.
+func seeds(tb testing.TB, literal string, fixtures ...string) []fuzzSeed {
+	tb.Helper()
+	corpus := []fuzzSeed{{name: "literal", source: []byte(literal)}}
 	for _, fixture := range fixtures {
 		source, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "helm", filepath.FromSlash(fixture)))
 		if err != nil {
-			f.Fatal(err)
+			tb.Fatal(err)
 		}
-		f.Add(source)
+		corpus = append(corpus, fuzzSeed{name: fixture, source: source})
+	}
+	return corpus
+}
+
+// seed adds that corpus to a fuzz target.
+func seed(f *testing.F, literal string, fixtures ...string) {
+	f.Helper()
+	for _, entry := range seeds(f, literal, fixtures...) {
+		f.Add(entry.source)
 	}
 }
 

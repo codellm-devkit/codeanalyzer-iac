@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -511,13 +512,26 @@ func decodeAcceptedYAML(parsed yamlParse, destination any) error {
 
 // decodeYAML is the one place this dialect turns YAML text into a Go value. The
 // decoder dereferences a nil node for some malformed documents, such as a tag
-// with no value where a sequence is expected, so a panic inside it is reported
-// as that artifact's decode error rather than ending the whole analysis.
+// with no value where a sequence is expected, so a runtime panic inside it is
+// reported as that artifact's decode error rather than ending the analysis.
+//
+// The recover is deliberately narrow. Only a runtime.Error is converted: every
+// destination here is a plain struct with no custom UnmarshalYAML, so a runtime
+// panic can only come from the decoder walking a malformed document. Anything
+// else is re-panicked, so a future custom unmarshaler that panics deliberately
+// is not silently turned into "malformed YAML". Should such an unmarshaler ever
+// be added, its own nil dereference would still be masked here; give it a
+// destination that does not route through this function.
 func decodeYAML(source []byte, destination any, options ...yaml.DecodeOption) (err error) {
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("malformed YAML document: %v", recovered)
+		recovered := recover()
+		if recovered == nil {
+			return
 		}
+		if _, isRuntime := recovered.(runtime.Error); !isRuntime {
+			panic(recovered)
+		}
+		err = fmt.Errorf("malformed YAML document: %v", recovered)
 	}()
 	return yaml.UnmarshalWithOptions(source, destination, options...)
 }

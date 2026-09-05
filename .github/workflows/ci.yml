@@ -9,8 +9,10 @@ name: ci
 # every job, and the graph parity gate is fatal rather than skipped when CI is
 # set, so the whole suite runs in the job that has Neo4j beside it.
 on:
+  # A branch is gated by its pull request; pushing to main is the only push
+  # that needs its own run, so a PR branch is not built twice.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

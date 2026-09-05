@@ -183,10 +183,15 @@ are discarded rather than allowed onto either stream.
 - Exit 0: the analysis completed. Isolated failures — an unparsable file, a
   chart that could not render — are diagnostics inside the model, not process
   failures.
-- Exit 1: an analyzer-wide failure (unreadable input root, invalid
-  configuration, unreachable graph, failed output commit), or `--strict` with at
-  least one error-severity diagnostic. The inspectable output is written first
-  in every case, so a failing run still leaves a document to read.
+- Exit 1: an analyzer-wide failure, or `--strict` with at least one
+  error-severity diagnostic. Whether a document is published first depends on
+  how far the run got:
+  - An invalid configuration and a `--strict` failure are both decided after
+    the analysis has been written, so those runs still leave a document to
+    read — with the `IAC_HELM_INVALID_CONFIG` or error diagnostics in it.
+  - An unreadable input root, an unreachable graph, and a failed graph commit
+    all end the run before or instead of that write, so they publish nothing:
+    stdout is empty and `-o DIR` gets no file. The failure is on stderr.
 
 `--strict` changes only the exit status; it never changes the document.
 `--eager` reconciles away this analyzer's own stale facts for the selected
