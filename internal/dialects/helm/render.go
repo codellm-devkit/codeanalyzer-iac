@@ -492,14 +492,19 @@ func (run renderRun) decode(ctx context.Context, rendered map[string]string, eff
 			run.addRenderDiagnostic(render, helmRenderDecodeCode, "decode",
 				fmt.Sprintf("rendered document %d of %s is not a decodable Kubernetes document", ordinal, name))
 		}
-		// L1 counts meaningful source regions while a render emits documents: a
-		// range emits several documents from one region and a conditional emits
-		// none. Attribution is only sound when the two correspond one to one.
-		attributable := len(failed) == 0 && len(run.origins[name]) == len(documents)
-		for position, document := range documents {
+		// L1 records the source regions a file can emit resources from, never how
+		// many documents each one emits: a range emits several and a masked
+		// conditional emits none, and neither is knowable without rendering. A
+		// file with exactly one region is therefore the only file whose documents
+		// all have a sound origin, whatever the emitted count.
+		region := ""
+		if regions := run.origins[name]; len(regions) == 1 {
+			region = regions[0].ID
+		}
+		for _, document := range documents {
 			origins := []string{}
-			if attributable {
-				origins = []string{run.origins[name][position].ID}
+			if region != "" {
+				origins = []string{region}
 			}
 			resource, address := kubernetesResource(scope, document, origins)
 			// One render may emit the same address more than once; the document

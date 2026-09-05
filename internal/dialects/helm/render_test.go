@@ -896,3 +896,51 @@ func TestRenderDiagnosticsOmitTheRenderDirectory(t *testing.T) {
 		t.Errorf("diagnostic message = %q, want the render directory replaced", message)
 	}
 }
+
+func TestRenderMaskedRegionClaimsNoOriginDespiteMatchingCounts(t *testing.T) {
+	app, artifacts := inlineApplication(t, map[string]string{
+		"Chart.yaml": "apiVersion: v2\nname: masked\nversion: 0.1.0\n",
+		"templates/config.yaml": "{{- if .Values.enabled }}\napiVersion: v1\nkind: ConfigMap\nmetadata:\n" +
+			"  name: {{ .Release.Name }}-masked\n{{- end }}\n{{- range $index := until 2 }}\n---\napiVersion: v1\n" +
+			"kind: ConfigMap\nmetadata:\n  name: {{ $.Release.Name }}-r{{ $index }}\n{{- end }}\n",
+	})
+	template := artifacts["templates/config.yaml"].IaC.(*model.HelmTemplate)
+	render := renderOnlyProfile(t, app, "Chart.yaml")
+	if len(template.ResourceTemplates) != 2 || len(render.Resources) != 2 {
+		t.Fatalf("fixture is no longer the counterexample: %d regions, %d resources",
+			len(template.ResourceTemplates), len(render.Resources))
+	}
+	// The condition is false, so both documents come from the second region; a
+	// count check cannot see that, which is why only single-region files are
+	// attributed at all.
+	for _, key := range sortedKeysLocal(render.Resources) {
+		if origins := render.Resources[key].OriginIDs; len(origins) != 0 {
+			t.Errorf("resource %s claims origins %#v, want none for a multi-region template", key, origins)
+		}
+	}
+}
+
+func TestRenderSingleRegionTemplateAttributesEveryDocument(t *testing.T) {
+	app, artifacts := inlineApplication(t, map[string]string{
+		"Chart.yaml": "apiVersion: v2\nname: single\nversion: 0.1.0\n",
+		"templates/config.yaml": "{{- range $index := until 3 }}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n" +
+			"  name: {{ $.Release.Name }}-{{ $index }}\n{{- end }}\n",
+	})
+	template := artifacts["templates/config.yaml"].IaC.(*model.HelmTemplate)
+	if len(template.ResourceTemplates) != 1 {
+		t.Fatalf("fixture no longer has one L1 region: %d", len(template.ResourceTemplates))
+	}
+	region := ""
+	for _, key := range sortedKeysLocal(template.ResourceTemplates) {
+		region = template.ResourceTemplates[key].ID
+	}
+	render := renderOnlyProfile(t, app, "Chart.yaml")
+	if len(render.Resources) != 3 {
+		t.Fatalf("rendered resources = %#v, want the three documents the range emits", sortedKeysLocal(render.Resources))
+	}
+	for _, key := range sortedKeysLocal(render.Resources) {
+		if origins := render.Resources[key].OriginIDs; !slices.Equal(origins, []string{region}) {
+			t.Errorf("resource %s origins = %#v, want the file's only region %q", key, origins, region)
+		}
+	}
+}
