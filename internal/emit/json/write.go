@@ -61,6 +61,11 @@ func Write(directory string, payload []byte) error {
 		file.Close()
 		return fmt.Errorf("write output file: %w", err)
 	}
+	// os.CreateTemp opens at 0600; the published document is readable output.
+	if err := file.Chmod(0o644); err != nil {
+		file.Close()
+		return fmt.Errorf("set output file mode: %w", err)
+	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close output file: %w", err)
 	}

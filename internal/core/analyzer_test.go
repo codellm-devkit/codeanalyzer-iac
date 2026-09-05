@@ -26,7 +26,7 @@ const fixtureApp = "fixture"
 
 func TestAnalyzeRunsPhasesInOrder(t *testing.T) {
 	events := &recorder{}
-	source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n", "b.yaml": "b: 2\n"})
+	source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n", "b.yaml": "b: 2\n"}, events)
 	frontend := &fakeFrontend{events: events}
 
 	if _, err := analyzer(t, options.Options{AppName: fixtureApp, AnalysisLevel: 3, Jobs: 1}, source, frontend).Analyze(t.Context()); err != nil {
@@ -43,7 +43,7 @@ func TestAnalyzeRunsPhasesInOrder(t *testing.T) {
 		}
 		previous = phase
 	}
-	if len(got) != 6 {
+	if len(got) != 7 || got[0] != "load" {
 		t.Fatalf("events = %v, want load, two detects, two parses, resolve and evaluate", got)
 	}
 }
@@ -56,7 +56,7 @@ func TestAnalysisLevelGatesResolveAndEvaluate(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("L%d", level), func(t *testing.T) {
 			events := &recorder{}
-			source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n"})
+			source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n"}, events)
 			if _, err := analyzer(t, options.Options{AppName: fixtureApp, AnalysisLevel: level, Jobs: 2}, source, &fakeFrontend{events: events}).Analyze(t.Context()); err != nil {
 				t.Fatalf("Analyze() error = %v", err)
 			}
@@ -75,7 +75,7 @@ func TestAnalysisLevelGatesResolveAndEvaluate(t *testing.T) {
 
 func TestParseFailureIsDiagnosticAndOtherArtifactsStillParse(t *testing.T) {
 	events := &recorder{}
-	source := inlineSource(t, map[string]string{"broken.yaml": "a: 1\n", "sound.yaml": "b: 2\n"})
+	source := inlineSource(t, map[string]string{"broken.yaml": "a: 1\n", "sound.yaml": "b: 2\n"}, events)
 	frontend := &fakeFrontend{events: events, parseErrors: map[string]error{"broken.yaml": errors.New("unreadable template")}}
 
 	analysis, err := analyzer(t, options.Options{AppName: fixtureApp, AnalysisLevel: 1, Jobs: 2}, source, frontend).Analyze(t.Context())
@@ -101,7 +101,7 @@ func TestInvalidConfigurationIsFatalAfterAPartialModel(t *testing.T) {
 	source := inlineSource(t, map[string]string{
 		"Chart.yaml":             "apiVersion: v2\nname: partial\nversion: 0.1.0\n",
 		".codeanalyzer-iac.yaml": "version: 7\nrenders: []\n",
-	})
+	}, &recorder{})
 	opts := options.Options{AppName: fixtureApp, AnalysisLevel: 3, Jobs: 2, Config: ".codeanalyzer-iac.yaml"}
 
 	analysis, err := analyzer(t, opts, source, helm.New()).Analyze(t.Context())
@@ -121,7 +121,7 @@ func TestInvalidConfigurationIsFatalAfterAPartialModel(t *testing.T) {
 
 func TestErrorDiagnosticsAreFatalOnlyUnderStrict(t *testing.T) {
 	build := func(strict bool) (*model.Analysis, error) {
-		source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n"})
+		source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n"}, &recorder{})
 		source.result.Diagnostics = map[string]*model.Diagnostic{
 			"unreadable": {
 				ID:       model.SemanticID(fixtureApp, "source", "diagnostic", "IAC_SOURCE_UNREADABLE"),
@@ -151,7 +151,7 @@ func TestErrorDiagnosticsAreFatalOnlyUnderStrict(t *testing.T) {
 func TestAnalyzeStopsOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n"})
+	source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n"}, &recorder{})
 
 	if _, err := analyzer(t, options.Options{AppName: fixtureApp, AnalysisLevel: 3, Jobs: 2}, source, &fakeFrontend{events: &recorder{}}).Analyze(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Analyze() error = %v, want context.Canceled", err)
@@ -164,7 +164,7 @@ func TestCypherEmissionRunsEvaluation(t *testing.T) {
 	if opts.AnalysisLevel != 3 {
 		t.Fatalf("resolved analysis level = %d, want 3 for graph emission", opts.AnalysisLevel)
 	}
-	source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n"})
+	source := inlineSource(t, map[string]string{"a.yaml": "a: 1\n"}, events)
 
 	if _, err := analyzer(t, opts, source, &fakeFrontend{events: events}).Analyze(t.Context()); err != nil {
 		t.Fatalf("Analyze() error = %v", err)
@@ -332,11 +332,11 @@ func (f *fakeFrontend) Evaluate(context.Context, *model.Application, dialect.Eva
 	return model.Delta{}, nil
 }
 
-func inlineSource(t *testing.T, files map[string]string) *fakeSource {
+func inlineSource(t *testing.T, files map[string]string, events *recorder) *fakeSource {
 	t.Helper()
 	source := &fakeSource{
 		result: ingest.Result{Artifacts: map[string]*model.Artifact{}, Diagnostics: map[string]*model.Diagnostic{}},
-		events: &recorder{},
+		events: events,
 	}
 	for path, text := range files {
 		id, err := model.ArtifactID(fixtureApp, path)

@@ -3,6 +3,7 @@ package options
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/ingest"
 )
@@ -91,9 +92,12 @@ func (o Options) Validate() error {
 		if o.WorkspaceRoot != "" {
 			return fmt.Errorf("--workspace-root is not supported in graph mode")
 		}
-		if o.Config != "" && !isGraphConfig(o.Config, o.AppName) {
-			return fmt.Errorf("--config must be a can://artifact/... ID or safe app-relative path in graph mode")
-		}
+	}
+	if o.Config != "" && !isAddressableConfig(o.Config, o.AppName) {
+		return fmt.Errorf("--config must be a can://artifact/... ID or an application-relative path")
+	}
+	if o.Emit == EmitSchema && len(o.Inputs) != 0 {
+		return fmt.Errorf("--emit schema takes no input")
 	}
 
 	if o.AnalysisLevel < 1 || o.AnalysisLevel > 3 {
@@ -133,7 +137,17 @@ func isGraphURI(input string) bool {
 	}
 }
 
-func isGraphConfig(config, appName string) bool {
+// isAddressableConfig accepts the one selector grammar both input modes share:
+// a canonical Artifact ID, or a safe application-relative path. In filesystem
+// mode the application name is derived from the workspace root after
+// validation, so an unnamed application can only be offered a relative path.
+func isAddressableConfig(config, appName string) bool {
+	if appName == "" {
+		if strings.HasPrefix(config, "can://") {
+			return false
+		}
+		appName = "placeholder"
+	}
 	_, err := ingest.GraphConfigArtifactID(appName, config)
 	return err == nil
 }

@@ -987,3 +987,47 @@ func TestEvaluateRendersEveryDeclaredProfile(t *testing.T) {
 		}
 	}
 }
+
+// TestEvaluateIsolatesAnUnrenderableProfile pins the same rule the parse phase
+// follows: a request that cannot be rendered at all is that render's failure,
+// never the whole evaluation's.
+func TestEvaluateIsolatesAnUnrenderableProfile(t *testing.T) {
+	app, artifacts := inlineApplication(t, map[string]string{
+		"app/Chart.yaml":            "apiVersion: v2\nname: sound\nversion: 0.1.0\n",
+		"app/templates/config.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}\n",
+		"stray/notes.yaml":          "unindexed: true\n",
+	})
+	applyProfiles(t, app, "")
+	// A chart facet on an artifact the chart index cannot own is schedulable and
+	// impossible to render: newRenderRun rejects it before any render identity.
+	stray := artifacts["stray/notes.yaml"]
+	stray.IaC = &model.HelmChart{
+		Dialect: dialectName, Kind: "helm_chart", Status: "complete", APIVersion: "v2", Name: "stray", Version: "0.1.0",
+		Dependencies: map[string]*model.HelmDependency{}, Renders: map[string]*model.HelmRender{},
+	}
+	profile := defaultProfile(stray)
+	if profile == nil {
+		t.Fatal("the stray chart declares no default profile")
+	}
+	stray.IaC.(*model.HelmChart).RenderProfiles = map[string]*model.HelmRenderProfile{profile.Name: profile}
+
+	delta, err := New().Evaluate(t.Context(), app, dialect.EvaluationInput{Jobs: 2, TempRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v, want the failure isolated to its own render", err)
+	}
+	if renders := delta.ArtifactPatches[artifacts["app/Chart.yaml"].ID].Renders; len(renders) != 1 {
+		t.Fatalf("renders for the sound chart = %d, want the profile that could be rendered", len(renders))
+	}
+	found := ""
+	for _, id := range sortedKeysLocal(delta.Diagnostics) {
+		if delta.Diagnostics[id].ArtifactID == stray.ID {
+			found = delta.Diagnostics[id].Message
+		}
+	}
+	if found == "" {
+		t.Fatalf("diagnostics = %v, want one for the profile that cannot be rendered", delta.Diagnostics)
+	}
+	if !strings.Contains(found, profile.Name) {
+		t.Errorf("diagnostic message = %q, want the profile it belongs to", found)
+	}
+}

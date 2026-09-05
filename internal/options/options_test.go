@@ -101,21 +101,33 @@ func TestValidateGraphConfigRejectsNonAddressableValues(t *testing.T) {
 				Emit:          EmitAuto,
 				Config:        config,
 			}).Validate()
-			if err == nil || !strings.Contains(err.Error(), "--config must be a can://artifact/... ID or safe app-relative path in graph mode") {
+			if err == nil || !strings.Contains(err.Error(), "--config must be a can://artifact/... ID or an application-relative path") {
 				t.Fatalf("got %v", err)
 			}
 		})
 	}
 }
 
-func TestValidateLeavesFilesystemConfigForLaterValidation(t *testing.T) {
-	err := (Options{
-		Inputs:        []string{"charts/api"},
-		AnalysisLevel: 1,
-		Emit:          EmitAuto,
-		Config:        "/tmp/codeanalyzer-iac.yaml",
-	}).Validate()
-	if err != nil {
+func TestValidateRejectsUnaddressableConfigInEveryMode(t *testing.T) {
+	for _, config := range []string{"/tmp/codeanalyzer-iac.yaml", "./codeanalyzer-iac.yaml", "../codeanalyzer-iac.yaml"} {
+		t.Run(config, func(t *testing.T) {
+			err := (Options{Inputs: []string{"charts/payments"}, AnalysisLevel: 1, Emit: EmitAuto, Config: config}).Validate()
+			if err == nil || !strings.Contains(err.Error(), "--config must be a can://artifact/... ID or an application-relative path") {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsAnApplicationRelativeConfigWithoutAnApplicationName(t *testing.T) {
+	if err := (Options{Inputs: []string{"."}, AnalysisLevel: 1, Emit: EmitAuto, Config: ".codeanalyzer-iac.yaml"}).Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateRejectsInputWithSchemaEmission(t *testing.T) {
+	err := (Options{Inputs: []string{"charts/payments"}, AnalysisLevel: 1, Emit: EmitSchema}).Validate()
+	if err == nil || err.Error() != "--emit schema takes no input" {
+		t.Fatalf("got %v", err)
 	}
 }

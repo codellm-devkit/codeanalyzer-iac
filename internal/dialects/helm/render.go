@@ -632,11 +632,12 @@ func digestBytes(value []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// profileRender is one scheduled render: the chart facet to render and the
-// profile that configures it.
+// profileRender is one scheduled render: the chart to render and the profile
+// that configures it.
 type profileRender struct {
-	chart   *model.HelmChart
-	profile *model.HelmRenderProfile
+	artifact *model.Artifact
+	chart    *model.HelmChart
+	profile  *model.HelmRenderProfile
 }
 
 // evaluate renders every declared profile - the default profile of each chart
@@ -663,7 +664,13 @@ func evaluate(ctx context.Context, app *model.Application, input dialect.Evaluat
 		group.Go(func() error {
 			delta, err := renderProfile(groupContext, app, render.chart, render.profile, input.TempRoot)
 			if err != nil {
-				return fmt.Errorf("render profile %s: %w", render.profile.ID, err)
+				if contextError(groupContext) != nil {
+					return err
+				}
+				// A profile that cannot be rendered at all has no render identity
+				// to hang a failed render from, so it fails as a diagnostic on the
+				// chart it targets. The other profiles still render.
+				delta = unrenderableProfileDelta(render, err)
 			}
 			deltas[index] = delta
 			return nil
@@ -697,7 +704,7 @@ func scheduledRenders(app *model.Application, configArtifactID string) []profile
 			return
 		}
 		if facet, ok := chart.IaC.(*model.HelmChart); ok && facet != nil {
-			renders = append(renders, profileRender{chart: facet, profile: profile})
+			renders = append(renders, profileRender{artifact: chart, chart: facet, profile: profile})
 		}
 	}
 	for _, artifactPath := range sortedArtifactPaths(app.Artifacts) {
@@ -758,4 +765,22 @@ func unionInto[V any](destination *map[string]V, source map[string]V) {
 	for _, key := range sortedKeysLocal(source) {
 		(*destination)[key] = source[key]
 	}
+}
+
+// unrenderableProfileDelta reports a profile whose render could not even be
+// set up. The message carries the profile so one impossible request cannot be
+// mistaken for another.
+func unrenderableProfileDelta(render profileRender, cause error) model.Delta {
+	id := semanticIDForArtifact(render.artifact, "diagnostic", helmRenderLoadCode, render.profile.Name)
+	delta := model.Delta{Diagnostics: map[string]*model.Diagnostic{id: {
+		ID:         id,
+		Kind:       "diagnostic",
+		Severity:   "error",
+		Code:       helmRenderLoadCode,
+		Message:    "render profile " + render.profile.Name + " cannot be rendered: " + cause.Error(),
+		Phase:      "load",
+		ArtifactID: render.artifact.ID,
+	}}}
+	addEdge(&delta, model.IaCHasDiagnostic, render.artifact.ID, id)
+	return delta
 }

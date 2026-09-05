@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/cli"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/contract"
@@ -104,7 +105,7 @@ func writeAnalysis(directory string, payload []byte) error {
 }
 
 func writeSchema(directory string) error {
-	payload := append(bytes.TrimRight(contract.Neo4jSchema, "\n"), '\n')
+	payload := slices.Concat(bytes.TrimRight(contract.Neo4jSchema, "\n"), []byte("\n"))
 	if directory == "" {
 		_, err := os.Stdout.Write(payload)
 		return err

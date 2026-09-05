@@ -75,6 +75,20 @@ func TestWriteReplacesAnalysisJSONWithoutLeavingTemporaryFiles(t *testing.T) {
 	}
 }
 
+func TestWriteLeavesTheAnalysisReadable(t *testing.T) {
+	directory := t.TempDir()
+	if err := Write(directory, []byte("{}\n")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	info, err := os.Stat(filepath.Join(directory, "analysis.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("analysis.json mode = %v, want 0644", info.Mode().Perm())
+	}
+}
+
 func TestWriteCreatesTheOutputDirectory(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "nested", "out")
 	if err := Write(directory, []byte("{}\n")); err != nil {
