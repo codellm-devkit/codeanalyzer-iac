@@ -797,3 +797,102 @@ func captureStandardError(t *testing.T) func() string {
 		return result
 	}
 }
+
+func TestRenderNamelessDocumentKeepsTheAnalysisValid(t *testing.T) {
+	app, _ := inlineApplication(t, map[string]string{
+		"Chart.yaml": "apiVersion: v2\nname: nameless\nversion: 0.1.0\n",
+		"templates/config.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}\n" +
+			"---\napiVersion: v1\nkind: List\nitems: []\n",
+	})
+	render := renderOnlyProfile(t, app, "Chart.yaml")
+	if render.Status != "partial" || render.Phase != "decode" {
+		t.Fatalf("render status/phase = %q/%q, want partial/decode for a document with no name", render.Status, render.Phase)
+	}
+	resource := onlyResource(t, render)
+	if resource.ResourceKind != "ConfigMap" {
+		t.Errorf("kept resource = %#v, want only the named document", resource)
+	}
+}
+
+func TestRenderRangeEmittedDocumentsClaimNoOrigin(t *testing.T) {
+	app, artifacts := inlineApplication(t, map[string]string{
+		"Chart.yaml": "apiVersion: v2\nname: ranged\nversion: 0.1.0\n",
+		"templates/config.yaml": "{{- range $index := until 2 }}\napiVersion: v1\nkind: ConfigMap\nmetadata:\n" +
+			"  name: {{ $.Release.Name }}-r{{ $index }}\n---\n{{- end }}\napiVersion: v1\nkind: ConfigMap\nmetadata:\n" +
+			"  name: {{ $.Release.Name }}-tail\n",
+	})
+	template := artifacts["templates/config.yaml"].IaC.(*model.HelmTemplate)
+	render := renderOnlyProfile(t, app, "Chart.yaml")
+	if len(render.Resources) != 3 {
+		t.Fatalf("rendered resources = %#v, want the two ranged documents and the tail document", sortedKeysLocal(render.Resources))
+	}
+	if len(template.ResourceTemplates) != 2 {
+		t.Fatalf("fixture no longer has fewer L1 regions than rendered documents: %d regions", len(template.ResourceTemplates))
+	}
+	for _, key := range sortedKeysLocal(render.Resources) {
+		if origins := render.Resources[key].OriginIDs; len(origins) != 0 {
+			t.Errorf("resource %s claims origins %#v, want none when documents and regions do not correspond", key, origins)
+		}
+	}
+}
+
+// TestRenderCoalescingWarningsLeakConflictingValues documents a known leak in
+// the pinned SDK rather than asserting desired behaviour: Helm's value
+// coalescing writes the conflicting value to the standard logger. Task 11
+// discards that logger process-wide before any worker runs; this case is its
+// regression target.
+func TestRenderCoalescingWarningsLeakConflictingValues(t *testing.T) {
+	const canary = "canary-merge-conflict-2b7d"
+	app, artifacts := inlineApplication(t, map[string]string{
+		"Chart.yaml":            "apiVersion: v2\nname: conflicting\nversion: 0.1.0\n",
+		"templates/config.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}\ndata:\n  secret: '{{ .Values.secret }}'\n",
+		"values-table.yaml":     "secret:\n  password: " + canary + "\n",
+		"values-scalar.yaml":    "secret: plain\n",
+		".codeanalyzer-iac.yaml": "version: 1\nrenders:\n  - name: conflicting\n    chart: Chart.yaml\n    release_name: conflicting\n" +
+			"    values:\n      - values-table.yaml\n      - values-scalar.yaml\n",
+	})
+	applyProfiles(t, app, artifacts[".codeanalyzer-iac.yaml"].ID)
+	chart := artifacts["Chart.yaml"]
+	profile := profileNamed(t, app, chart, "conflicting")
+
+	restore := captureStandardError(t)
+	delta, err := renderProfile(t.Context(), app, chart.IaC.(*model.HelmChart), profile, t.TempDir())
+	logged := restore()
+	if err != nil {
+		t.Fatalf("renderProfile() error = %v", err)
+	}
+	if strings.Contains(mustJSON(t, jsonDocument(t, delta)), canary) {
+		t.Errorf("render delta contains the conflicting value %q", canary)
+	}
+	if !strings.Contains(logged, canary) {
+		t.Skipf("the pinned SDK no longer logs conflicting values; Task 11's logger mitigation may be unnecessary: %q", logged)
+	}
+	if !strings.Contains(logged, "cannot overwrite table with non table") {
+		t.Errorf("standard logger output = %q, want Helm's value coalescing warning", logged)
+	}
+}
+
+func TestRenderDiagnosticsOmitTheRenderDirectory(t *testing.T) {
+	app, artifacts := inlineApplication(t, map[string]string{"Chart.yaml": "apiVersion: v2\nname: unreadable\nversion: 0.1.0\n"})
+	chart := artifacts["Chart.yaml"]
+	// A chart whose text ingest could not read is inventoried without source, so
+	// nothing is materialized and the SDK reports the render directory path.
+	facet := chart.IaC.(*model.HelmChart)
+	chart.Source = ""
+	chart.SizeBytes = 0
+	root := t.TempDir()
+
+	delta, err := renderProfile(t.Context(), app, facet, defaultProfile(chart), root)
+	if err != nil {
+		t.Fatalf("renderProfile() error = %v", err)
+	}
+	render := renderFromDelta(t, delta, chart.ID)
+	id := assertRenderDiagnostic(t, render, helmRenderLoadCode, "load")
+	message := render.Diagnostics[id].Message
+	if strings.Contains(message, root) {
+		t.Errorf("diagnostic message embeds the ephemeral render directory: %q", message)
+	}
+	if !strings.Contains(message, "<render>") {
+		t.Errorf("diagnostic message = %q, want the render directory replaced", message)
+	}
+}

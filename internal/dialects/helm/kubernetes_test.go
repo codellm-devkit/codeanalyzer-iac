@@ -142,3 +142,28 @@ func TestKubernetesAddressesRequireAStableName(t *testing.T) {
 		t.Errorf("address ID = %q, want %q", named.AddressID, want)
 	}
 }
+
+func TestKubernetesNamelessDocumentsAreNotResources(t *testing.T) {
+	documents, failed, err := decodeDocuments(t.Context(), "apiVersion: v1\nkind: List\nitems: []\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: named\n")
+	if err != nil {
+		t.Fatalf("decodeDocuments() error = %v", err)
+	}
+	if !slices.Equal(failed, []int{0}) {
+		t.Fatalf("failed document ordinals = %#v, want the nameless document", failed)
+	}
+	if len(documents) != 1 || documents[0].Object.GetName() != "named" {
+		t.Fatalf("decoded documents = %#v, want only the named document", documents)
+	}
+}
+
+func TestKubernetesPluralIsBuiltInDataOnly(t *testing.T) {
+	if got := kubernetesPlural("apps/v1", "Deployment"); got != "deployments" {
+		t.Errorf("kubernetesPlural(apps/v1, Deployment) = %q, want %q", got, "deployments")
+	}
+	if got := kubernetesPlural("v1", "ConfigMap"); got != "configmaps" {
+		t.Errorf("kubernetesPlural(v1, ConfigMap) = %q, want %q", got, "configmaps")
+	}
+	if got := kubernetesPlural("example.test/v1alpha1", "Widget"); got != "" {
+		t.Errorf("kubernetesPlural(example.test/v1alpha1, Widget) = %q, want no guessed plural", got)
+	}
+}

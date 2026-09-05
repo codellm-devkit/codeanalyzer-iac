@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiyaml "k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/kubernetes/scheme"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
@@ -64,6 +65,10 @@ func decodeDocuments(ctx context.Context, rendered string) ([]decodedDocument, [
 		case resource.GetAPIVersion() == "" || resource.GetKind() == "":
 			// A document that names no resource is not a Kubernetes document.
 			failed = append(failed, ordinal)
+		case resource.GetName() == "" && resource.GetGenerateName() == "":
+			// A document with neither name nor generateName, such as a List,
+			// has no identity to address or to build a resource ID from.
+			failed = append(failed, ordinal)
 		default:
 			documents = append(documents, decodedDocument{Ordinal: ordinal, Object: resource})
 		}
@@ -86,6 +91,9 @@ func sanitizeResource(object *unstructured.Unstructured) (map[string]any, map[st
 	for _, field := range []string{"data", "stringData"} {
 		values, ok := sanitized[field].(map[string]any)
 		if !ok {
+			// Anything else under these fields is unreadable secret material;
+			// dropping it keeps "no plaintext survives" structural.
+			delete(sanitized, field)
 			continue
 		}
 		hashed := make(map[string]any, len(values))
@@ -175,14 +183,20 @@ func kubernetesResource(scope resourceScope, document decodedDocument, originIDs
 	return resource, address
 }
 
-// kubernetesPlural returns the built-in resource name for a kind. It uses
-// apimachinery's offline mapping only; no discovery or cluster access.
+// kubernetesPlural returns the resource name for a kind that the built-in
+// Kubernetes scheme knows. A kind outside that scheme, such as a chart's own
+// custom resource, has no plural here: the mapping would be a guess, and CRD
+// names are not carried in the model.
 func kubernetesPlural(apiVersion, resourceKind string) string {
 	if resourceKind == "" {
 		return ""
 	}
 	group, version := parseGroupVersion(apiVersion)
-	plural, _ := meta.UnsafeGuessKindToResource(schema.GroupVersionKind{Group: group, Version: version, Kind: resourceKind})
+	kind := schema.GroupVersionKind{Group: group, Version: version, Kind: resourceKind}
+	if !scheme.Scheme.Recognizes(kind) {
+		return ""
+	}
+	plural, _ := meta.UnsafeGuessKindToResource(kind)
 	return plural.Resource
 }
 

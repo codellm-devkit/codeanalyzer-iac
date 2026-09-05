@@ -49,6 +49,7 @@ type renderRun struct {
 	members       map[string]*model.Artifact
 	origins       map[string][]*model.HelmResourceTemplate
 	layerIDs      []string
+	directory     string
 	identity      string
 	inputHash     string
 	digest        string
@@ -93,6 +94,7 @@ func renderProfile(ctx context.Context, app *model.Application, chart *model.Hel
 		return model.Delta{}, fmt.Errorf("create render directory: %w", err)
 	}
 	defer os.RemoveAll(directory)
+	run.directory = directory
 
 	if err := materializeChart(ctx, directory, run.members); err != nil {
 		return run.failedRender(ctx, "load", helmRenderLoadCode, err)
@@ -126,6 +128,10 @@ func renderProfile(ctx context.Context, app *model.Application, chart *model.Hel
 		capabilities.KubeVersion = *kubeVersion
 	}
 	capabilities.APIVersions = append(capabilities.APIVersions, profile.APIVersions...)
+	// ponytail: ToRenderValues coalesces through log.Printf, so a table/non-table
+	// conflict writes the conflicting value to the standard logger. Discarding
+	// that logger is process-wide policy and belongs to the analyzer entry point
+	// (Task 11), not to a library function that runs in parallel workers.
 	renderValues, err := chartutil.ToRenderValues(loaded, merged, common.ReleaseOptions{
 		Name:      profile.ReleaseName,
 		Namespace: profile.Namespace,
@@ -185,6 +191,9 @@ func newRenderRun(ctx context.Context, app *model.Application, chart *model.Helm
 	}
 	run.collectChart(index, root, root, root.facet.Name)
 	run.layerIDs, run.inputHash = renderIdentityFacts(app, profile, run.members)
+	// Only this prefix reaches the model: the accepted schema's HelmRender has
+	// no field for the full input digest and forbids additional properties, so
+	// the render ID carries the whole persisted record of the render inputs.
 	run.digest = run.inputHash[:renderIdentityDigestLength]
 	return run, nil
 }
@@ -483,8 +492,16 @@ func (run renderRun) decode(ctx context.Context, rendered map[string]string, eff
 			run.addRenderDiagnostic(render, helmRenderDecodeCode, "decode",
 				fmt.Sprintf("rendered document %d of %s is not a decodable Kubernetes document", ordinal, name))
 		}
-		for _, document := range documents {
-			resource, address := kubernetesResource(scope, document, run.originIDs(name, document.Ordinal))
+		// L1 counts meaningful source regions while a render emits documents: a
+		// range emits several documents from one region and a conditional emits
+		// none. Attribution is only sound when the two correspond one to one.
+		attributable := len(failed) == 0 && len(run.origins[name]) == len(documents)
+		for position, document := range documents {
+			origins := []string{}
+			if attributable {
+				origins = []string{run.origins[name][position].ID}
+			}
+			resource, address := kubernetesResource(scope, document, origins)
 			// One render may emit the same address more than once; the document
 			// ordinal, and then a counter, keeps each occurrence addressable.
 			base := resource.ID
@@ -529,16 +546,6 @@ func isNonManifestTemplate(name string) bool {
 	return base == "NOTES.txt" || strings.HasPrefix(base, "_")
 }
 
-// originIDs returns the resource template one rendered document came from.
-func (run renderRun) originIDs(name string, ordinal int) []string {
-	for _, template := range run.origins[name] {
-		if template.DocumentIndex == ordinal {
-			return []string{template.ID}
-		}
-	}
-	return []string{}
-}
-
 // failedRender returns the render fact for a chart that could not be rendered. A
 // context that is already done is an error rather than a render fact, so a
 // cancelled analysis never emits a failure it did not observe.
@@ -546,10 +553,15 @@ func (run renderRun) failedRender(ctx context.Context, phase, code string, cause
 	if err := contextError(ctx); err != nil {
 		return model.Delta{}, err
 	}
+	// A failed render has no effective values; the digest of the empty value set
+	// is recorded because the accepted schema requires the field.
 	render := run.newRender(canonicalSHA256(nil))
 	render.Status = "failed"
 	render.Phase = phase
-	run.addRenderDiagnostic(render, code, phase, fmt.Sprintf("render profile %s could not be rendered: %v", run.profile.Name, cause))
+	// The SDK reports paths inside the render directory, whose name is random
+	// per run; keeping it out of the message keeps diagnostics deterministic.
+	message := strings.ReplaceAll(fmt.Sprintf("%v", cause), run.directory, "<render>")
+	run.addRenderDiagnostic(render, code, phase, "render profile "+run.profile.Name+" could not be rendered: "+message)
 	return run.delta(render), nil
 }
 
