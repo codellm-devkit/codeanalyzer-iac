@@ -7,8 +7,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/goccy/go-yaml"
-
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/dialect"
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
@@ -155,7 +153,7 @@ func buildChartAnchorIndex(artifacts map[string]*model.Artifact) []chartAnchor {
 
 func validChartMetadata(source string) (chartMetadata, bool) {
 	var metadata chartMetadata
-	if err := yaml.Unmarshal([]byte(source), &metadata); err != nil {
+	if err := decodeYAML([]byte(source), &metadata); err != nil {
 		return chartMetadata{}, false
 	}
 	metadata.APIVersion = strings.TrimSpace(metadata.APIVersion)
@@ -413,7 +411,7 @@ func flowMappingHasKey(value, key string) bool {
 		return false
 	}
 	var mapping map[string]any
-	if err := yaml.Unmarshal([]byte(value), &mapping); err != nil {
+	if err := decodeYAML([]byte(value), &mapping); err != nil {
 		return false
 	}
 	_, ok := mapping[key]

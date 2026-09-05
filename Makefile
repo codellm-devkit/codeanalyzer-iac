@@ -1,4 +1,4 @@
-.PHONY: sync-schema test test-live test-live-head vet
+.PHONY: sync-schema test race vet schema-check fuzz-smoke test-live test-live-head
 
 sync-schema:
 	cp schema.json internal/contract/schema.json
@@ -6,6 +6,26 @@ sync-schema:
 
 test:
 	go test ./...
+
+race:
+	go test -race ./...
+
+# schema-check fails on any drift between the accepted contract files, the
+# copies the binary embeds, and the catalog the emitter generates.
+schema-check:
+	cmp schema.json internal/contract/schema.json
+	cmp schema.neo4j.json internal/contract/schema.neo4j.json
+	go test ./internal/contract ./internal/emit/neo4j
+
+# fuzz-smoke is the short, deterministic-duration lane CI runs. A longer
+# campaign is `go test ./internal/dialects/helm -run '^$$' -fuzz <target>`.
+fuzz-smoke:
+	go test ./internal/dialects/helm -run '^$$' -fuzz FuzzHelmTemplateNeverPanics -fuzztime=10s
+	go test ./internal/dialects/helm -run '^$$' -fuzz FuzzHelmValuesNeverPanics -fuzztime=10s
+	go test ./internal/dialects/helm -run '^$$' -fuzz FuzzHelmChartNeverPanics -fuzztime=10s
+	go test ./internal/dialects/helm -run '^$$' -fuzz FuzzHelmConfigNeverPanics -fuzztime=10s
+	go test ./internal/dialects/helm -run '^$$' -fuzz FuzzHelmValuesSchemaNeverPanics -fuzztime=10s
+	go test ./internal/dialects/helm -run '^$$' -fuzz FuzzRenderedDocumentsNeverPanic -fuzztime=10s
 
 # The live acceptance gate needs a network, Helm 4.2.4 and a disposable Neo4j.
 # It is build-tagged so `make test` stays offline. See README.md.

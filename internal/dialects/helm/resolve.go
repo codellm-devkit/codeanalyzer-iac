@@ -10,7 +10,6 @@ import (
 	"text/template/parse"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/goccy/go-yaml"
 
 	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
 )
@@ -219,7 +218,7 @@ func newResolutionIndex(ctx context.Context, app *model.Application) (*resolutio
 				continue
 			}
 			values := map[string]any{}
-			if yaml.Unmarshal([]byte(artifact.Source), &values) == nil {
+			if decodeYAML([]byte(artifact.Source), &values) == nil {
 				index.valuesByChartID[owner.artifact.ID] = append(index.valuesByChartID[owner.artifact.ID], chartValuesDocument{artifactID: artifact.ID, priority: valueSourcePriority(facet.Roles), values: values})
 			}
 		case *model.HelmTemplate:

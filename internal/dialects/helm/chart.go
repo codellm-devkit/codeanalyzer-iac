@@ -506,7 +506,20 @@ func decodeAcceptedYAML(parsed yamlParse, destination any) error {
 		}
 		return fmt.Errorf("empty YAML document")
 	}
-	return yaml.Unmarshal([]byte(parsed.accepted), destination)
+	return decodeYAML([]byte(parsed.accepted), destination)
+}
+
+// decodeYAML is the one place this dialect turns YAML text into a Go value. The
+// decoder dereferences a nil node for some malformed documents, such as a tag
+// with no value where a sequence is expected, so a panic inside it is reported
+// as that artifact's decode error rather than ending the whole analysis.
+func decodeYAML(source []byte, destination any, options ...yaml.DecodeOption) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("malformed YAML document: %v", recovered)
+		}
+	}()
+	return yaml.UnmarshalWithOptions(source, destination, options...)
 }
 
 // normalizeTokenOffsets converts goccy's one-based rune offsets into one-based

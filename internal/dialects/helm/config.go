@@ -141,7 +141,7 @@ func addConfigProfiles(delta *model.Delta, app *model.Application, configArtifac
 		return nil
 	}
 	var document configFile
-	if err := yaml.UnmarshalWithOptions([]byte(artifact.Source), &document, yaml.Strict()); err != nil {
+	if err := decodeYAML([]byte(artifact.Source), &document, yaml.Strict()); err != nil {
 		addConfigDiagnostic(delta, artifact, "configuration is not an accepted document: "+err.Error(), "document")
 		return nil
 	}

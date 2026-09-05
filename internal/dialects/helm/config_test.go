@@ -253,6 +253,9 @@ func TestInvalidConfigDiagnosesAndEmitsNoConfigProfiles(t *testing.T) {
 		{"missing chart artifact", "version: 1\nrenders:\n  - name: broken\n    chart: charts/absent/Chart.yaml\n"},
 		{"chart selector is not a chart", "version: 1\nrenders:\n  - name: broken\n    chart: values.yaml\n"},
 		{"missing value artifact", "version: 1\nrenders:\n  - name: broken\n    chart: Chart.yaml\n    values:\n      - values-absent.yaml\n"},
+		// FuzzHelmConfigNeverPanics found this one: a tag with no value where a
+		// sequence is expected makes the YAML decoder dereference a nil node.
+		{"valueless tag where a sequence is expected", "version: 1\nrenders: !0 "},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

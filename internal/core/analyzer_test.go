@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -357,4 +358,49 @@ func inlineSource(t *testing.T, files map[string]string, events *recorder) *fake
 		}
 	}
 	return source
+}
+
+// TestConfigurationIsInterpretedOnlyAtLevel3 records a real limit of the
+// pipeline: the configuration artifact is always inventoried, but its content
+// is read when profiles are built, which happens only at L3. A caller who wants
+// the declared profiles must ask for L3.
+func TestConfigurationIsInterpretedOnlyAtLevel3(t *testing.T) {
+	const configPath = ".codeanalyzer-iac.yaml"
+	for level := 1; level <= 3; level++ {
+		t.Run(fmt.Sprintf("level_%d", level), func(t *testing.T) {
+			analysis := analyzeConfiguredFixture(t, "profiles", configPath, level)
+			config := analysis.Application.Artifacts[configPath]
+			if config == nil {
+				t.Fatalf("artifacts = %v, want the configuration to be inventoried at every level", sortedArtifactPaths(analysis))
+			}
+			hasProfiles := config.CodeAnalyzerIaCConfig != nil
+			if want := level == 3; hasProfiles != want {
+				t.Fatalf("configuration facet present = %t at level %d, want %t", hasProfiles, level, want)
+			}
+			if !hasProfiles {
+				return
+			}
+			if got := sortedKeys(config.CodeAnalyzerIaCConfig.RenderProfiles); !slices.Equal(got, []string{"minimal", "production"}) {
+				t.Fatalf("declared profiles = %v, want the fixture's two", got)
+			}
+		})
+	}
+}
+
+func analyzeConfiguredFixture(t *testing.T, fixture, config string, level int) *model.Analysis {
+	t.Helper()
+	source, err := filesystem.New(fixtureApp, filepath.Join("..", "..", "testdata", "helm", fixture), nil, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := options.Options{AppName: fixtureApp, AnalysisLevel: level, Jobs: 2, Config: config}
+	analysis, err := New(opts, source, dialect.NewRegistry(helm.New())).Analyze(t.Context())
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	return analysis
+}
+
+func sortedArtifactPaths(analysis *model.Analysis) []string {
+	return sortedKeys(analysis.Application.Artifacts)
 }
