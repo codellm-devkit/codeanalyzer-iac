@@ -1,0 +1,91 @@
+name: ci
+
+# The ordinary gate. Nothing here clones a repository, reaches a registry or
+# needs a credential: modules are downloaded before the tests run, and the tests
+# themselves talk only to the job's own Neo4j service. The network-dependent
+# acceptance lane lives in live.yml behind the `live` build tag.
+#
+# The split between the two jobs is exactly the database. Actions sets CI in
+# every job, and the graph parity gate is fatal rather than skipped when CI is
+# set, so the whole suite runs in the job that has Neo4j beside it.
+on:
+  # A branch is gated by its pull request; pushing to main is the only push
+  # that needs its own run, so a PR branch is not built twice.
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: format, vet, schema and fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Download dependencies
+        run: go mod download
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l cmd internal tests)"
+          if [ -n "${unformatted}" ]; then
+            echo "gofmt -w the following files:" >&2
+            echo "${unformatted}" >&2
+            exit 1
+          fi
+      - name: Check the module graph is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: Vet
+        run: make vet
+      # The packages that need no service, for fast feedback.
+      - name: Unit tests
+        run: go test ./cmd/... ./internal/...
+      - name: Schema drift
+        run: make schema-check
+      - name: Fuzz smoke
+        run: make fuzz-smoke
+
+  tests:
+    name: full suite with a graph
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      neo4j:
+        image: neo4j:5
+        env:
+          NEO4J_AUTH: neo4j/test-password
+        ports:
+          - 7687:7687
+          - 7474:7474
+        options: >-
+          --health-cmd "wget --quiet --tries=1 --spider http://localhost:7474 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      NEO4J_TEST_URI: neo4j://localhost:7687
+      NEO4J_TEST_USERNAME: neo4j
+      NEO4J_TEST_PASSWORD: test-password
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Modules are downloaded before the gates run, so the tests themselves
+      # need nothing but the service container beside them.
+      - name: Download dependencies
+        run: go mod download
+      # CI is set by Actions, so the graph parity gate fails rather than skips
+      # if the service above is ever missing.
+      - name: Unit, end-to-end, parity and security tests
+        run: make test
+      - name: Race tests
+        run: make race

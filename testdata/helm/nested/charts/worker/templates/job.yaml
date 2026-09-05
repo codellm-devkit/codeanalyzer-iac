@@ -1,0 +1,18 @@
+{{- define "worker.fullname" -}}worker{{- end -}}
+{{- define "worker.labels" -}}app=worker{{- end -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "worker.fullname" . }}
+  labels:
+    direct: {{ template "worker.labels" . }}
+    block: {{ block "worker.block" . }}fallback{{ end }}
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: example.test/worker:{{ .Values.image.tag }}
+          args:
+            - {{ index .Values "literal.key" }}
+            - {{ tpl .Values.dynamicTemplate . }}

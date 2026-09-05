@@ -1,0 +1,12 @@
+/caniac
+/analysis.json
+/graph.cypher
+/coverage.out
+.DS_Store
+
+# SCHEMA_DECISIONS.md is repository content. A global ignore of `.claude`
+# would stop git descending into the directory at all, so the directory is
+# re-included here and everything else inside it stays ignored.
+!.claude/
+.claude/*
+!.claude/SCHEMA_DECISIONS.md

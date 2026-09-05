@@ -1,0 +1,656 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codellm-devkit.github.io/schema/v2/iac/analysis.schema.json",
+  "title": "codeanalyzer-iac schema v2 analysis output",
+  "x-cldk": {
+    "schemaVersion": "2.0.0",
+    "language": "iac",
+    "source": {
+      "repo": "codellm-devkit/codeanalyzer-iac",
+      "release": "v0.1.0",
+      "definedIn": "internal/model"
+    }
+  },
+  "$ref": "#/$defs/Analysis",
+  "$defs": {
+    "ApplicationId": {
+      "type": "string",
+      "pattern": "^can://iac/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+(?![\\s\\S])"
+    },
+    "ArtifactId": {
+      "type": "string",
+      "pattern": "^can://artifact/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)*(?![\\s\\S])"
+    },
+    "ConfigKeyId": {
+      "type": "string",
+      "pattern": "^can://artifact/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)*@key/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)*(?![\\s\\S])"
+    },
+    "SemanticId": {
+      "type": "string",
+      "pattern": "^can://iac/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)*(?:@(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+(?::(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)*)?(?![\\s\\S])"
+    },
+    "Purl": {
+      "type": "string",
+      "pattern": "^pkg:oci/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)*(?:@(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)?(?:\\?[a-z][a-z0-9._-]*=(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+(?:&[a-z][a-z0-9._-]*=(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)*)?(?:#(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)*)?(?![\\s\\S])"
+    },
+    "AliasTargetId": {
+      "oneOf": [
+        {"$ref": "#/$defs/ArtifactId"},
+        {"$ref": "#/$defs/SemanticId"}
+      ]
+    },
+    "ValueSourceId": {
+      "oneOf": [
+        {"$ref": "#/$defs/ArtifactId"},
+        {"$ref": "#/$defs/ConfigKeyId"}
+      ]
+    },
+    "OriginId": {
+      "oneOf": [
+        {"$ref": "#/$defs/ArtifactId"},
+        {"$ref": "#/$defs/ConfigKeyId"},
+        {"$ref": "#/$defs/SemanticId"}
+      ]
+    },
+    "NodeId": {
+      "oneOf": [
+        {"$ref": "#/$defs/ApplicationId"},
+        {"$ref": "#/$defs/ArtifactId"},
+        {"$ref": "#/$defs/ConfigKeyId"},
+        {"$ref": "#/$defs/SemanticId"},
+        {"$ref": "#/$defs/Purl"}
+      ]
+    },
+    "Analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "language", "max_level", "analyzer", "application"],
+      "properties": {
+        "schema_version": {"const": "2.0.0"},
+        "language": {"const": "iac"},
+        "max_level": {"type": "integer", "minimum": 1, "maximum": 3},
+        "analyzer": {"$ref": "#/$defs/Analyzer"},
+        "application": {"$ref": "#/$defs/Application"}
+      }
+    },
+    "Analyzer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "codeanalyzer-iac"},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "Application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "artifacts",
+        "packages",
+        "external_chart_references",
+        "kubernetes_resource_addresses",
+        "diagnostics",
+        "edges"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/ApplicationId"},
+        "kind": {"const": "application"},
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/Artifact"}
+        },
+        "packages": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/Package"}
+        },
+        "external_chart_references": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/HelmChartReference"}
+        },
+        "kubernetes_resource_addresses": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/KubernetesResourceAddress"}
+        },
+        "diagnostics": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/Diagnostic"}
+        },
+        "edges": {"$ref": "#/$defs/Edges"}
+      }
+    },
+    "Artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "path", "format", "source", "sha256", "size_bytes", "config_keys", "aliases"],
+      "properties": {
+        "id": {"$ref": "#/$defs/ArtifactId"},
+        "kind": {"const": "artifact"},
+        "path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\\\]+$"
+        },
+        "format": {"type": "string", "minLength": 1},
+        "source": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "config_keys": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/ConfigKey"}
+        },
+        "aliases": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/IdentityAlias"}
+        },
+        "iac": {"$ref": "#/$defs/IaCFacet"},
+        "codeanalyzer_iac_config": {"$ref": "#/$defs/CodeAnalyzerIaCConfig"}
+      }
+    },
+    "Span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "bytes"],
+      "properties": {
+        "start": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "end": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "bytes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "ConfigKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "name", "path", "span"],
+      "properties": {
+        "id": {"$ref": "#/$defs/ConfigKeyId"},
+        "kind": {"const": "config_key"},
+        "name": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "span": {"$ref": "#/$defs/Span"},
+        "iac": {"$ref": "#/$defs/HelmValueFacet"}
+      }
+    },
+    "IdentityAlias": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "target"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"type": "string", "minLength": 1},
+        "target": {"$ref": "#/$defs/AliasTargetId"}
+      }
+    },
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "severity", "code", "message"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "diagnostic"},
+        "severity": {"enum": ["info", "warning", "error"]},
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1},
+        "phase": {"enum": ["load", "dependency", "values", "template", "decode"]},
+        "artifact_id": {"$ref": "#/$defs/ArtifactId"},
+        "span": {"$ref": "#/$defs/Span"}
+      }
+    },
+    "Package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "purl"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Purl"},
+        "kind": {"const": "package"},
+        "purl": {"$ref": "#/$defs/Purl"}
+      }
+    },
+    "Edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["src", "dst"],
+      "properties": {
+        "src": {"$ref": "#/$defs/NodeId"},
+        "dst": {"$ref": "#/$defs/NodeId"}
+      }
+    },
+    "IaCFacet": {
+      "oneOf": [
+        {"$ref": "#/$defs/HelmChart"},
+        {"$ref": "#/$defs/HelmRequirements"},
+        {"$ref": "#/$defs/HelmLock"},
+        {"$ref": "#/$defs/HelmValues"},
+        {"$ref": "#/$defs/HelmValuesSchema"},
+        {"$ref": "#/$defs/HelmTemplate"},
+        {"$ref": "#/$defs/HelmCRD"},
+        {"$ref": "#/$defs/HelmIgnore"}
+      ]
+    },
+    "HelmChart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dialect", "kind", "status", "api_version", "name", "version", "dependencies", "renders"],
+      "properties": {
+        "dialect": {"const": "helm"},
+        "kind": {"const": "helm_chart"},
+        "status": {"enum": ["complete", "partial", "failed"]},
+        "api_version": {"enum": ["v1", "v2"]},
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "kube_version": {"type": "string"},
+        "description": {"type": "string"},
+        "chart_type": {"enum": ["application", "library"]},
+        "keywords": {"type": "array", "items": {"type": "string"}},
+        "home": {"type": "string"},
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "maintainers": {"type": "array", "items": {"$ref": "#/$defs/HelmMaintainer"}},
+        "icon": {"type": "string"},
+        "app_version": {"type": "string"},
+        "deprecated": {"type": "boolean"},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "dependencies": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmDependency"}},
+        "render_profiles": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmRenderProfile"}},
+        "renders": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmRender"}}
+      }
+    },
+    "HelmMaintainer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "email": {"type": "string", "minLength": 1},
+        "url": {"type": "string", "minLength": 1}
+      }
+    },
+    "HelmRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dialect", "kind", "status", "roles", "dependencies"],
+      "properties": {
+        "dialect": {"const": "helm"},
+        "kind": {"const": "helm_requirements"},
+        "status": {"enum": ["complete", "partial", "failed"]},
+        "roles": {"const": ["legacy_dependency_manifest"]},
+        "dependencies": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmDependency"}}
+      }
+    },
+    "HelmLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dialect", "kind", "status", "roles", "dependencies"],
+      "properties": {
+        "dialect": {"const": "helm"},
+        "kind": {"const": "helm_lock"},
+        "status": {"enum": ["complete", "partial", "failed"]},
+        "roles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["dependency_lock", "legacy_dependency_lock"]}
+        },
+        "dependencies": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmDependency"}}
+      }
+    },
+    "HelmValues": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dialect", "kind", "status", "roles"],
+      "properties": {
+        "dialect": {"const": "helm"},
+        "kind": {"const": "helm_values"},
+        "status": {"enum": ["complete", "partial", "failed"]},
+        "roles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["default", "parent", "override"]}
+        }
+      }
+    },
+    "HelmValuesSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dialect", "kind", "status", "roles"],
+      "properties": {
+        "dialect": {"const": "helm"},
+        "kind": {"const": "helm_values_schema"},
+        "status": {"enum": ["complete", "partial", "failed"]},
+        "roles": {"const": ["validation_schema"]}
+      }
+    },
+    "HelmTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dialect",
+        "kind",
+        "status",
+        "roles",
+        "named_templates",
+        "template_calls",
+        "value_references",
+        "resource_templates",
+        "lookup_references"
+      ],
+      "properties": {
+        "dialect": {"const": "helm"},
+        "kind": {"const": "helm_template"},
+        "status": {"enum": ["complete", "partial", "failed"]},
+        "roles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["resource", "helper", "notes", "test", "hook"]}
+        },
+        "named_templates": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmNamedTemplate"}},
+        "template_calls": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmTemplateCall"}},
+        "value_references": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmValueReference"}},
+        "resource_templates": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmResourceTemplate"}},
+        "lookup_references": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmLookupReference"}}
+      }
+    },
+    "HelmCRD": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dialect", "kind", "status", "roles"],
+      "properties": {
+        "dialect": {"const": "helm"},
+        "kind": {"const": "helm_crd"},
+        "status": {"enum": ["complete", "partial", "failed"]},
+        "roles": {"const": ["custom_resource_definition"]}
+      }
+    },
+    "HelmIgnore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dialect", "kind", "status", "roles"],
+      "properties": {
+        "dialect": {"const": "helm"},
+        "kind": {"const": "helm_ignore"},
+        "status": {"enum": ["complete", "partial", "failed"]},
+        "roles": {"const": ["ignore_rules"]}
+      }
+    },
+    "HelmDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "name", "version_constraint", "span"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_dependency"},
+        "name": {"type": "string", "minLength": 1},
+        "version_constraint": {"type": "string", "minLength": 1},
+        "alias": {"type": "string", "minLength": 1},
+        "repository": {"type": "string", "minLength": 1},
+        "condition": {"type": "string", "minLength": 1},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "import_values": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {"type": "string"},
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["child", "parent"],
+                "properties": {
+                  "child": {"type": "string"},
+                  "parent": {"type": "string"}
+                }
+              }
+            ]
+          }
+        },
+        "span": {"$ref": "#/$defs/Span"}
+      }
+    },
+    "HelmNamedTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "name", "span"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_named_template"},
+        "name": {"type": "string", "minLength": 1},
+        "span": {"$ref": "#/$defs/Span"}
+      }
+    },
+    "HelmTemplateCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "call_kind", "name_expression", "span"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_template_call"},
+        "call_kind": {"enum": ["template", "include", "block", "tpl"]},
+        "name_expression": {"type": "string"},
+        "target_id": {"$ref": "#/$defs/SemanticId"},
+        "span": {"$ref": "#/$defs/Span"}
+      }
+    },
+    "HelmValueReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "path_expression", "span"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_value_reference"},
+        "path_expression": {"type": "string", "minLength": 1},
+        "target_id": {"$ref": "#/$defs/ConfigKeyId"},
+        "span": {"$ref": "#/$defs/Span"}
+      }
+    },
+    "HelmResourceTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "document_index", "span"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_resource_template"},
+        "document_index": {"type": "integer", "minimum": 0},
+        "span": {"$ref": "#/$defs/Span"}
+      }
+    },
+    "HelmLookupReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "group_expression",
+        "version_expression",
+        "resource_kind_expression",
+        "namespace_expression",
+        "name_expression",
+        "span"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_lookup_reference"},
+        "group_expression": {"type": "string"},
+        "version_expression": {"type": "string"},
+        "resource_kind_expression": {"type": "string"},
+        "namespace_expression": {"type": "string"},
+        "name_expression": {"type": "string"},
+        "span": {"$ref": "#/$defs/Span"}
+      }
+    },
+    "EdgeMap": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/Edge"}
+    },
+    "Edges": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "has_artifact": {"$ref": "#/$defs/EdgeMap"},
+        "defines_config": {"$ref": "#/$defs/EdgeMap"},
+        "iac_part_of_chart": {"$ref": "#/$defs/EdgeMap"},
+        "iac_declares_dependency": {"$ref": "#/$defs/EdgeMap"},
+        "iac_targets_chart_reference": {"$ref": "#/$defs/EdgeMap"},
+        "iac_resolves_to_chart": {"$ref": "#/$defs/EdgeMap"},
+        "iac_identified_by_package": {"$ref": "#/$defs/EdgeMap"},
+        "iac_defines_template": {"$ref": "#/$defs/EdgeMap"},
+        "iac_has_template_call": {"$ref": "#/$defs/EdgeMap"},
+        "iac_calls_template": {"$ref": "#/$defs/EdgeMap"},
+        "iac_has_value_reference": {"$ref": "#/$defs/EdgeMap"},
+        "iac_references_value": {"$ref": "#/$defs/EdgeMap"},
+        "iac_declares_profile": {"$ref": "#/$defs/EdgeMap"},
+        "iac_renders_chart": {"$ref": "#/$defs/EdgeMap"},
+        "iac_has_value_layer": {"$ref": "#/$defs/EdgeMap"},
+        "iac_reads_from": {"$ref": "#/$defs/EdgeMap"},
+        "iac_has_render": {"$ref": "#/$defs/EdgeMap"},
+        "iac_configured_by": {"$ref": "#/$defs/EdgeMap"},
+        "iac_has_diagnostic": {"$ref": "#/$defs/EdgeMap"},
+        "iac_produces": {"$ref": "#/$defs/EdgeMap"},
+        "iac_targets_resource": {"$ref": "#/$defs/EdgeMap"},
+        "iac_derived_from": {"$ref": "#/$defs/EdgeMap"},
+        "iac_alias_of": {"$ref": "#/$defs/EdgeMap"}
+      }
+    },
+    "HelmChartReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "name", "version_constraint"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_chart_reference"},
+        "name": {"type": "string", "minLength": 1},
+        "version_constraint": {"type": "string", "minLength": 1},
+        "repository": {"type": "string", "minLength": 1},
+        "purl": {"$ref": "#/$defs/Purl"},
+        "resolved_chart_id": {"$ref": "#/$defs/ArtifactId"}
+      }
+    },
+    "CodeAnalyzerIaCConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "config_version", "render_profiles"],
+      "properties": {
+        "kind": {"const": "codeanalyzer_iac_config"},
+        "config_version": {"const": 1},
+        "render_profiles": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmRenderProfile"}}
+      }
+    },
+    "HelmRenderProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "name", "origin", "chart_id", "release_name", "namespace", "value_layers", "api_versions"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_render_profile"},
+        "name": {"type": "string", "minLength": 1},
+        "origin": {"enum": ["default", "config"]},
+        "chart_id": {"$ref": "#/$defs/ArtifactId"},
+        "release_name": {"type": "string", "minLength": 1},
+        "namespace": {"type": "string", "minLength": 1},
+        "value_layers": {"type": "object", "additionalProperties": {"$ref": "#/$defs/HelmValueLayer"}},
+        "api_versions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "kube_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "HelmValueLayer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "ordinal", "source_id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_value_layer"},
+        "ordinal": {"type": "integer", "minimum": 0},
+        "source_id": {"$ref": "#/$defs/ValueSourceId"}
+      }
+    },
+    "HelmRender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "status", "profile_id", "renderer_name", "renderer_version", "value_layer_ids", "effective_values_sha256", "diagnostics", "resources"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "helm_render"},
+        "status": {"enum": ["succeeded", "partial", "failed", "skipped"]},
+        "profile_id": {"$ref": "#/$defs/SemanticId"},
+        "renderer_name": {"type": "string", "minLength": 1},
+        "renderer_version": {"type": "string", "minLength": 1},
+        "value_layer_ids": {"type": "array", "items": {"$ref": "#/$defs/SemanticId"}},
+        "effective_values_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "diagnostics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/Diagnostic"}},
+        "resources": {"type": "object", "additionalProperties": {"$ref": "#/$defs/KubernetesResource"}},
+        "phase": {"enum": ["load", "dependency", "values", "template", "decode"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "succeeded"}}},
+          "then": {"not": {"required": ["phase"]}},
+          "else": {"required": ["phase"]}
+        }
+      ]
+    },
+    "KubernetesResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "api_version", "resource_kind", "manifest_sha256", "render_id", "origin_ids"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "kubernetes_resource"},
+        "api_version": {"type": "string", "minLength": 1},
+        "resource_kind": {"type": "string", "minLength": 1},
+        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "render_id": {"$ref": "#/$defs/SemanticId"},
+        "origin_ids": {"type": "array", "items": {"$ref": "#/$defs/OriginId"}},
+        "namespace": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "generate_name": {"type": "string", "minLength": 1},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "plural": {"type": "string", "minLength": 1},
+        "address_id": {"$ref": "#/$defs/SemanticId"},
+        "secret_data": {"type": "object", "additionalProperties": {"$ref": "#/$defs/KubernetesSecretDatum"}}
+      }
+    },
+    "KubernetesSecretDatum": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "sha256"],
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "KubernetesResourceAddress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "group", "resource_kind", "namespace", "name"],
+      "properties": {
+        "id": {"$ref": "#/$defs/SemanticId"},
+        "kind": {"const": "kubernetes_resource_address"},
+        "group": {"type": "string"},
+        "resource_kind": {"type": "string", "minLength": 1},
+        "namespace": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "plural": {"type": "string", "minLength": 1}
+      }
+    },
+    "HelmValueFacet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"const": "helm_value"}
+      }
+    }
+  }
+}

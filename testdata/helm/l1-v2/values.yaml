@@ -1,0 +1,14 @@
+replicaCount: 2
+image:
+  repository: example/api
+  tag: "1.2.3"
+"image.tag": literal-key
+emptyMap: {}
+emptyList: []
+ports:
+  - name: http
+    containerPort: 8080
+defaults: &defaults
+  pullPolicy: IfNotPresent
+copy: *defaults
+"snow☃.key": quoted

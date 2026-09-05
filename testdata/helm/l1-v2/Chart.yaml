@@ -1,0 +1,32 @@
+apiVersion: v2
+name: sample
+description: "A Unicode ☃ chart"
+type: application
+version: 1.2.3+build.7
+kubeVersion: ">= 1.27.0-0"
+keywords:
+  - api
+  - example
+home: https://example.test/sample
+sources:
+  - https://github.com/example/sample
+maintainers:
+  - name: Ada Lovelace
+    email: ada@example.test
+    url: https://example.test/ada
+icon: https://example.test/icon.svg
+appVersion: "2.4.0"
+deprecated: true
+annotations:
+  example.test/owner: platform
+dependencies:
+  - name: postgresql
+    alias: db
+    version: "~12.1.0"
+    repository: https://charts.example.test
+    condition: database.enabled
+    tags: [data, required]
+    import-values:
+      - data
+      - child: exports.service
+        parent: imports.service

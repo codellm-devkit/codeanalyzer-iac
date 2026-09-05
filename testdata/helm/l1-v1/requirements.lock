@@ -1,0 +1,6 @@
+dependencies:
+  - name: mysql
+    version: 8.4.1
+    repository: https://charts.example.test/legacy
+digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+generated: "2026-09-02T00:00:00Z"

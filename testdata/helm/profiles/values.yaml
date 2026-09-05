@@ -1,0 +1,4 @@
+replicaCount: 1
+image:
+  repository: registry.example.test/profiles-demo
+  tag: "1.0.0"

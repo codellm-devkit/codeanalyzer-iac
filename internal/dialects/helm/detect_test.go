@@ -1,0 +1,325 @@
+package helm
+
+import (
+	"context"
+	"reflect"
+	"testing"
+
+	"github.com/codellm-devkit/codeanalyzer-iac/internal/dialect"
+	"github.com/codellm-devkit/codeanalyzer-iac/internal/model"
+)
+
+func TestDetectClassifiesOnlyContentValidatedChartMembers(t *testing.T) {
+	artifacts := helmArtifacts(t, map[string]string{
+		"charts/root/Chart.yaml":                           "apiVersion: v2\nname: root\nversion: 1.2.3\n",
+		"charts/root/values.yaml":                          "replicas: 2\n",
+		"charts/root/values.schema.json":                   `{"type":"object"}`,
+		"charts/root/templates/deployment.yaml":            "apiVersion: v1\nkind: ConfigMap\n",
+		"charts/root/templates/_helpers.tpl":               `{{ define "root.name" }}root{{ end }}`,
+		"charts/root/templates/NOTES.txt":                  "thank you\n",
+		"charts/root/templates/tests/smoke.yaml":           "metadata:\n  annotations:\n    helm.sh/hook: test-success\n",
+		"charts/root/templates/hook.yaml":                  "metadata:\n  annotations:\n    helm.sh/hook: pre-install\n",
+		"charts/root/crds/widgets.yaml":                    "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\n",
+		"charts/root/Chart.lock":                           "generated: now\n",
+		"charts/root/.helmignore":                          ".git\n",
+		"charts/root/README.md":                            "raw\n",
+		"charts/root/LICENSE":                              "raw\n",
+		"charts/root/charts/vendored/Chart.yaml":           "apiVersion: v1\nname: vendored\nversion: 0.1.0\ntype: library\n",
+		"charts/root/charts/vendored/templates/child.yaml": "apiVersion: v1\nkind: ConfigMap\n",
+		"outside.yaml":                                     "apiVersion: v1\nkind: ConfigMap\n",
+		"false-positive/Chart.yaml":                        "apiVersion: v3\nname: invalid\nversion: 1.0.0\n",
+		"package.tgz":                                      "not a chart archive to expand",
+	})
+
+	detections := detectAll(t, artifacts)
+	assertDetection(t, detections, artifacts["charts/root/Chart.yaml"], "helm_chart", []string{"application"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/values.yaml"], "helm_values", []string{"default"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/values.schema.json"], "helm_values_schema", []string{"validation_schema"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/templates/deployment.yaml"], "helm_template", []string{"resource"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/templates/_helpers.tpl"], "helm_template", []string{"helper"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/templates/NOTES.txt"], "helm_template", []string{"notes"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/templates/tests/smoke.yaml"], "helm_template", []string{"hook", "test"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/templates/hook.yaml"], "helm_template", []string{"hook", "resource"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/crds/widgets.yaml"], "helm_crd", []string{"custom_resource_definition"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/Chart.lock"], "helm_lock", []string{"dependency_lock"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/.helmignore"], "helm_ignore", []string{"ignore_rules"}, artifacts["charts/root/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/charts/vendored/Chart.yaml"], "helm_chart", []string{"library"}, artifacts["charts/root/charts/vendored/Chart.yaml"].ID)
+	assertDetection(t, detections, artifacts["charts/root/charts/vendored/templates/child.yaml"], "helm_template", []string{"resource"}, artifacts["charts/root/charts/vendored/Chart.yaml"].ID)
+
+	for _, rawPath := range []string{"charts/root/README.md", "charts/root/LICENSE", "outside.yaml", "false-positive/Chart.yaml", "package.tgz"} {
+		if _, ok := detections[artifacts[rawPath].ID]; ok {
+			t.Fatalf("%s was classified as Helm: %#v", rawPath, detections[artifacts[rawPath].ID])
+		}
+	}
+}
+
+func TestDetectClassifiesLegacyFilesAndExplicitOverrides(t *testing.T) {
+	artifacts := helmArtifacts(t, map[string]string{
+		"Chart.yaml":        "apiVersion: v1\nname: legacy\nversion: 0.1.0\n",
+		"requirements.yaml": "dependencies: []\n",
+		"requirements.lock": "dependencies: []\n",
+		"values-prod.yaml":  "replicas: 3\n",
+	})
+	configID, err := model.ArtifactID("app", "config.yaml")
+	if err != nil {
+		t.Fatalf("ArtifactID() error = %v", err)
+	}
+	artifacts["config.yaml"] = &model.Artifact{ID: configID, Kind: "artifact", Path: "config.yaml", CodeAnalyzerIaCConfig: &model.CodeAnalyzerIaCConfig{RenderProfiles: map[string]*model.HelmRenderProfile{
+		"production": {ValueLayers: map[string]*model.HelmValueLayer{"000": {SourceID: artifacts["values-prod.yaml"].ID}}},
+	}}}
+
+	detections := detectAll(t, artifacts)
+	chartID := artifacts["Chart.yaml"].ID
+	assertDetection(t, detections, artifacts["requirements.yaml"], "helm_requirements", []string{"legacy_dependency_manifest"}, chartID)
+	assertDetection(t, detections, artifacts["requirements.lock"], "helm_lock", []string{"legacy_dependency_lock"}, chartID)
+	assertDetection(t, detections, artifacts["values-prod.yaml"], "helm_values", []string{"override"}, chartID)
+}
+
+func TestFrontendStubsHonorCancellationWithoutMutatingApplication(t *testing.T) {
+	artifact := helmArtifacts(t, map[string]string{"Chart.yaml": "apiVersion: v2\nname: chart\nversion: 1.0.0\n"})["Chart.yaml"]
+	app := model.NewApplication("app", map[string]*model.Artifact{artifact.Path: artifact})
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	frontend := New()
+
+	if _, err := frontend.Parse(canceled, artifact, dialect.Detection{}); err == nil {
+		t.Fatal("Parse() error = nil, want cancellation")
+	}
+	if _, err := frontend.Resolve(canceled, app); err == nil {
+		t.Fatal("Resolve() error = nil, want cancellation")
+	}
+	if _, err := frontend.Evaluate(canceled, app, dialect.EvaluationInput{}); err == nil {
+		t.Fatal("Evaluate() error = nil, want cancellation")
+	}
+	if artifact.IaC != nil || len(app.Diagnostics) != 0 {
+		t.Fatalf("frontend stubs mutated source: artifact=%#v diagnostics=%#v", artifact.IaC, app.Diagnostics)
+	}
+}
+
+func TestFrontendDetectReturnsSortedRolesWithoutRegistry(t *testing.T) {
+	artifacts := helmArtifacts(t, map[string]string{
+		"Chart.yaml":                 "apiVersion: v2\nname: chart\nversion: 1.0.0\n",
+		"templates/tests/smoke.yaml": "metadata:\n  annotations:\n    helm.sh/hook: test-success\n",
+	})
+	artifact := artifacts["templates/tests/smoke.yaml"]
+
+	got, matched, err := New().Detect(dialect.ArtifactContext{Artifact: artifact, Artifacts: artifacts})
+	if err != nil || !matched {
+		t.Fatalf("Detect() = (%#v, %t, %v)", got, matched, err)
+	}
+	if want := []string{"hook", "test"}; !reflect.DeepEqual(got.Roles, want) {
+		t.Fatalf("roles = %#v, want %#v", got.Roles, want)
+	}
+}
+
+func TestDetectMarksHooksOnlyFromMetadataAnnotations(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		source   string
+		wantHook bool
+	}{
+		{
+			name:     "unquoted annotation",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations:\n    helm.sh/hook: test-success\n",
+			wantHook: true,
+		},
+		{
+			name:     "quoted annotation amid template action",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations:\n    {{- if .Values.tests }}\n    \"helm.sh/hook\": test-success\n    {{- end }}\n",
+			wantHook: true,
+		},
+		{
+			name:     "direct mapping nodes with trailing comments",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata: # object metadata\n  annotations: # object annotations\n    helm.sh/hook: pre-install\n",
+			wantHook: true,
+		},
+		{
+			name:     "unquoted flow annotations",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations: {helm.sh/hook: pre-install}\n",
+			wantHook: true,
+		},
+		{
+			name:     "double quoted flow annotation",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations: {\"helm.sh/hook\": \"pre-install\"}\n",
+			wantHook: true,
+		},
+		{
+			name:     "single quoted flow annotation with siblings and comment",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  annotations: {'example.com/note': 'safe', 'helm.sh/hook': 'pre-install'} # hooks\n",
+			wantHook: true,
+		},
+		{
+			name:   "scalar documentation",
+			source: "apiVersion: v1\nkind: ConfigMap\ndata:\n  documentation: |\n    helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "comment lookalike",
+			source: "apiVersion: v1\nkind: ConfigMap\n# helm.sh/hook: pre-install\n",
+		},
+		{
+			name:   "data key lookalike",
+			source: "apiVersion: v1\nkind: ConfigMap\ndata:\n  helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "annotation scalar block",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    documentation: |\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "nested annotation mapping lookalike",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    documentation:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "document separator clears annotation scope",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n---\n    helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "document end clears annotation scope",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n...\n    helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "spec metadata is not document root metadata",
+			source: "apiVersion: v1\nkind: Pod\nspec:\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "document root sequence element metadata is not root metadata",
+			source: "- apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "bare document root sequence element metadata is not root metadata",
+			source: "-\n  apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "later sequence document cannot inherit mapping root",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    note: no hook\n---\n- apiVersion: v1\n  metadata:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "metadata labels annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  labels:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "metadata spec annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  spec:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "metadata arbitrary container annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  custom:\n    annotations:\n      helm.sh/hook: documentation only\n",
+		},
+		{
+			name:     "direct annotations after sibling labels",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  labels:\n    app: test\n  annotations:\n    helm.sh/hook: test-success\n",
+			wantHook: true,
+		},
+		{
+			name:     "indented document root metadata",
+			source:   "  apiVersion: v1\n  kind: Pod\n  metadata:\n    annotations:\n      'helm.sh/hook': test-success\n",
+			wantHook: true,
+		},
+		{
+			name:   "annotations sequence descendant is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    - nested:\n        helm.sh/hook: documentation only\n",
+		},
+		{
+			name:   "nested hook in flow annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations: {documentation: {helm.sh/hook: documentation-only}}\n",
+		},
+		{
+			name:   "hook lookalike in flow annotation scalar is not a key",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations: {documentation: 'helm.sh/hook: documentation-only'}\n",
+		},
+		{
+			name:   "hook in flow sequence under annotations is not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations: [{helm.sh/hook: documentation-only}]\n",
+		},
+		{
+			name:   "nested flow annotations below labels are not direct",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  labels:\n    annotations: {helm.sh/hook: documentation-only}\n",
+		},
+		{
+			name:   "quoted annotation scalar with comment text is not a mapping",
+			source: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations: '# object annotations'\n    helm.sh/hook: documentation-only\n",
+		},
+		{
+			name:     "direct annotations after sequence sibling",
+			source:   "apiVersion: v1\nkind: Pod\nmetadata:\n  labels:\n    - app: test\n  annotations:\n    {{- if .Values.tests }}\n    helm.sh/hook: test-success\n    {{- end }}\n",
+			wantHook: true,
+		},
+		{
+			name:     "later document root hook",
+			source:   "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    note: no-hook\n--- # second document\napiVersion: v1\nkind: Pod\nmetadata:\n  annotations:\n    \"helm.sh/hook\": test-success\n",
+			wantHook: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := helmArtifacts(t, map[string]string{
+				"Chart.yaml":          "apiVersion: v2\nname: chart\nversion: 1.0.0\n",
+				"templates/item.yaml": test.source,
+			})
+			artifact := artifacts["templates/item.yaml"]
+			got, matched, err := New().Detect(dialect.ArtifactContext{Artifact: artifact, Artifacts: artifacts})
+			if err != nil || !matched {
+				t.Fatalf("Detect() = (%#v, %t, %v)", got, matched, err)
+			}
+			hasHook := false
+			for _, role := range got.Roles {
+				hasHook = hasHook || role == "hook"
+			}
+			if hasHook != test.wantHook {
+				t.Fatalf("roles = %#v, hook = %t, want %t", got.Roles, hasHook, test.wantHook)
+			}
+		})
+	}
+}
+
+func TestDetectLeavesEmptySourceArtifactsRawAndExcludesEmptyAnchors(t *testing.T) {
+	artifacts := helmArtifacts(t, map[string]string{
+		"Chart.yaml":                                    "apiVersion: v2\nname: root\nversion: 1.0.0\n",
+		"values.yaml":                                   "",
+		"charts/empty/Chart.yaml":                       "",
+		"charts/empty/templates/ignored.yaml":           "apiVersion: v1\nkind: ConfigMap\n",
+		"charts/valid/Chart.yaml":                       "apiVersion: v2\nname: valid\nversion: 1.0.0\n",
+		"charts/valid/templates/resource.yaml":          "",
+		"charts/valid/templates/nonempty-resource.yaml": "apiVersion: v1\nkind: ConfigMap\n",
+	})
+
+	detections := detectAll(t, artifacts)
+	for _, rawPath := range []string{"values.yaml", "charts/empty/Chart.yaml", "charts/empty/templates/ignored.yaml", "charts/valid/templates/resource.yaml"} {
+		if _, ok := detections[artifacts[rawPath].ID]; ok {
+			t.Fatalf("empty-source or empty-anchor artifact %s was detected: %#v", rawPath, detections[artifacts[rawPath].ID])
+		}
+	}
+	assertDetection(t, detections, artifacts["charts/valid/templates/nonempty-resource.yaml"], "helm_template", []string{"resource"}, artifacts["charts/valid/Chart.yaml"].ID)
+}
+
+func detectAll(t *testing.T, artifacts map[string]*model.Artifact) map[string]dialect.Detection {
+	t.Helper()
+	app := model.NewApplication("app", artifacts)
+	detections, delta := dialect.NewRegistry(New()).DetectAll(app)
+	if len(delta.Diagnostics) != 0 {
+		t.Fatalf("DetectAll() diagnostics = %#v", delta.Diagnostics)
+	}
+	return detections
+}
+
+func assertDetection(t *testing.T, detections map[string]dialect.Detection, artifact *model.Artifact, kind string, roles []string, chartID string) {
+	t.Helper()
+	got, ok := detections[artifact.ID]
+	if !ok {
+		t.Fatalf("no detection for %s", artifact.Path)
+	}
+	if got.Dialect != "helm" || got.Kind != kind || got.ChartArtifactID != chartID || !reflect.DeepEqual(got.Roles, roles) {
+		t.Fatalf("detection for %s = %#v, want kind=%q roles=%#v chart=%q", artifact.Path, got, kind, roles, chartID)
+	}
+}
+
+func helmArtifacts(t *testing.T, sources map[string]string) map[string]*model.Artifact {
+	t.Helper()
+	artifacts := make(map[string]*model.Artifact, len(sources))
+	for path, source := range sources {
+		id, err := model.ArtifactID("app", path)
+		if err != nil {
+			t.Fatalf("ArtifactID(%q) error = %v", path, err)
+		}
+		artifacts[path] = &model.Artifact{ID: id, Kind: "artifact", Path: path, Source: source}
+	}
+	return artifacts
+}

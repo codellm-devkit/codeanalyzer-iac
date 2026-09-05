@@ -1,0 +1,18 @@
+[
+  {
+    "name": "daytrader",
+    "url": "https://github.com/sample-daytrader/sample.daytrader.microservices.git",
+    "commit": "8a68b59430a94a242c54384763da9eb7682728b4",
+    "default_branch": "main",
+    "chart": "platform/helm",
+    "tracked_files": 21
+  },
+  {
+    "name": "quarkuscoffeeshop",
+    "url": "https://github.com/quarkuscoffeeshop/quarkuscoffeeshop-helm.git",
+    "commit": "aa3c842658e0fc7e44fa25132d8b817eab225cbe",
+    "default_branch": "master",
+    "chart": "charts/quarkuscoffeeshop-charts",
+    "tracked_files": 14
+  }
+]
