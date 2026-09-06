@@ -15,14 +15,15 @@ on:
       - "v*.*.*"
   workflow_dispatch: {}
 
-permissions:
-  contents: write          # create GitHub Release + delete tag on failure
-  id-token: write          # PyPI Trusted Publishing (OIDC) -- no API token needed
-  discussions: write       # attach the release-linked repo Discussion (Announcements)
-
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Scoped to this job: the homebrew job below needs neither, and nothing here
+    # needs `discussions: write` -- the only discussion this workflow writes is
+    # the org-level one, and that uses its own token on another repository.
+    permissions:
+      contents: write        # create GitHub Release + delete tag on failure
+      id-token: write        # PyPI Trusted Publishing (OIDC) -- no API token needed
     steps:
       - name: Check out code
         uses: actions/checkout@v5
@@ -61,26 +62,14 @@ jobs:
       # The offline gates only. The parity gate needs a Neo4j service and the
       # live gate needs a network, Helm and a schema checkout; both run in
       # ci.yml and live.yml, and neither belongs on the release path.
+      # No continue-on-error: a failure here must fail the job. The tag is then
+      # removed by the cleanup step at the end of the pre-publish path below,
+      # which `if: failure()` reaches even though every ordinary step is skipped.
       - name: Vet, test and schema drift
-        id: test
-        continue-on-error: true
         run: |
           make vet
           make test
           make schema-check
-
-      - name: Delete tag on failure
-        if: steps.test.conclusion == 'failure' && startsWith(github.ref, 'refs/tags/')
-        run: |
-          echo "Tests failed. Deleting tag ${GITHUB_REF#refs/tags/}..."
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git push --delete origin "${GITHUB_REF#refs/tags/}"
-          exit 1
-
-      - name: Fail if tests failed (non-tag runs)
-        if: steps.test.conclusion == 'failure'
-        run: exit 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -225,15 +214,32 @@ jobs:
           EOF
           echo "----- composed release body -----"; cat "$RUNNER_TEMP/RELEASE_BODY.md"
 
+      # Every step above is pre-publish: gates, wheels, smoke tests, assets and
+      # notes. If any of them failed, this is the only step that still runs, and
+      # it takes the tag back down so the same version can be re-tagged once the
+      # failure is fixed. It sits before the publishing steps deliberately --
+      # deleting the tag after a Release exists for it would orphan that Release,
+      # and re-running the workflow is the remedy there (the PyPI upload is
+      # idempotent via skip-existing).
+      - name: Delete tag on any pre-publish failure
+        if: failure() && startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "Release gate failed. Deleting tag ${GITHUB_REF#refs/tags/}..."
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git push --delete origin "${GITHUB_REF#refs/tags/}"
+
       - name: Publish GitHub Release (raw binaries)
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: release-bins/*
           body_path: ${{ runner.temp }}/RELEASE_BODY.md
-          # Auto-open a repo-level Discussion linked to this release, seeded with
-          # the same notes. Requires Discussions enabled and this category to exist.
-          discussion_category_name: Announcements
+          # No discussion_category_name: Discussions are disabled on this repo, and
+          # asking for a category that does not exist fails the step with a 422
+          # before anything is published. Add `discussion_category_name: Announcements`
+          # (and `discussions: write` to this job's permissions) once Discussions are
+          # enabled and that category exists.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -300,6 +306,9 @@ jobs:
     needs: release
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    # It only reads this repository; the tap push uses HOMEBREW_TAP_TOKEN.
+    permissions:
+      contents: read
     steps:
       - name: Check out code
         uses: actions/checkout@v5

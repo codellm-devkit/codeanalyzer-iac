@@ -9,7 +9,9 @@ description = "Prebuilt codeanalyzer-iac (caniac) backend binary for CLDK (codel
 # The PyPI long description is the repo root README, copied in by build_wheels.sh at build time
 # (single source of truth; the copy is gitignored). See that script for the cp + cleanup.
 readme = "README.md"
-requires-python = ">=3.8"
+# 3.9 is the oldest interpreter this package is tested against; 3.8 is end of
+# life and pip on it would happily install a wheel nothing verifies.
+requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 authors = [
     { name = "Rahul Krishna", email = "i.m.ralk@gmail.com" },

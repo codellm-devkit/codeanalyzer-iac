@@ -63,6 +63,11 @@ it becomes `codeanalyzer_iac.__version__`, the `-X main.version` linker stamp,
 what `caniac --version` prints, and `analyzer.version` in every emitted analysis
 document. The release workflow fails before publishing if they disagree.
 
+The tag must be an already normalized PEP 440 release version — `v0.1.0` or
+`v0.1.0rc1`, never `v0.1.0-rc1` or `v0.1.0-dev`. The workflow rejects anything
+else before it builds, and `make wheels` applies the same rule to `VERSION`, so
+the wheel filename, the Homebrew `version` field and the tag cannot drift apart.
+
 ## Filesystem analysis
 
 ```sh

@@ -27,6 +27,18 @@ REPO_ROOT="$(cd "$HERE/../.." && pwd)"          # codeanalyzer-iac repo root (ha
 # the binary as main.version, which is what `caniac --version` prints and what
 # every analysis document carries as analyzer.version.
 PKG_VERSION="${PKG_VERSION:-0.1.0}"
+
+# The same shape the release workflow requires of a tag. It has to be an already
+# normalized PEP 440 version, because the wheel filename below is spelled out
+# rather than read back from hatchling -- 0.1.0-dev or 0.1.0-rc1 would be
+# normalized to something else and the `wheel tags` call would miss the file.
+if [[ ! "$PKG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
+  echo "PKG_VERSION='$PKG_VERSION' is not a normalized PEP 440 release version." >&2
+  echo "Use X.Y.Z, optionally with aN, bN or rcN: 0.1.0, 0.1.0rc1." >&2
+  echo "Hint: 'make wheels' needs VERSION set, e.g. make wheels VERSION=0.1.0rc1." >&2
+  exit 1
+fi
+
 WHEEL_STEM="codeanalyzer_iac-${PKG_VERSION}-py3-none-any.whl"
 BIN_DIR="$HERE/src/codeanalyzer_iac/_bin"
 INIT_PY="$HERE/src/codeanalyzer_iac/__init__.py"

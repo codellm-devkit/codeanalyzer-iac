@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from importlib import resources
 from pathlib import Path
 
 __version__ = "0.1.0"
@@ -32,9 +31,11 @@ def bin_path() -> Path:
         FileNotFoundError: if the wheel for this platform did not include a binary
             (e.g. an unsupported platform, or a source/dev install with no build run).
     """
-    resource = resources.files("codeanalyzer_iac") / "_bin" / _BINARY_NAME
-    with resources.as_file(resource) as extracted:
-        path = Path(extracted)
+    # The wheel is always installed unzipped, so the binary sits next to this
+    # module. importlib.resources.as_file() would be the general answer, but it
+    # deletes an extracted temp copy when its context exits -- and this function
+    # returns a path the caller executes later.
+    path = Path(__file__).resolve().parent / "_bin" / _BINARY_NAME
 
     if not path.exists():
         raise FileNotFoundError(
