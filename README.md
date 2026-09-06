@@ -6,11 +6,6 @@ of its infrastructure sources as JSON and as a matching Neo4j projection. Helm
 is the first dialect; every other file stays an ordinary `Artifact` and is never
 dropped.
 
-The repository pins the accepted `codeanalyzer-schema` contract at
-[`b84428f1accebe2b259d32c15387f04a00167f2c`](https://github.com/codellm-devkit/codeanalyzer-schema/commit/b84428f1accebe2b259d32c15387f04a00167f2c).
-The root `schema.json` (2.0.0) and `schema.neo4j.json` (1.0.0) are copied
-byte-for-byte from that revision. Run `make sync-schema` before testing after a
-contract update.
 
 ## Install
 
