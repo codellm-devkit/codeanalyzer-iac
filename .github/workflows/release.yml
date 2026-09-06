@@ -1,0 +1,338 @@
+name: Release (binaries + Python wheels)
+
+# Builds the self-contained caniac binary for every supported platform and
+# publishes:
+#   1. the raw binaries, with a SHA256SUMS manifest, as GitHub Release assets
+#      (for analysis_backend_path / download-on-first-use use cases), and
+#   2. platform-tagged Python wheels to PyPI as `codeanalyzer-iac`.
+#
+# The analyzer is CGO-free, so one Linux host cross-compiles every target with
+# the stock Go toolchain and a single job suffices.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write          # create GitHub Release + delete tag on failure
+  id-token: write          # PyPI Trusted Publishing (OIDC) -- no API token needed
+  discussions: write       # attach the release-linked repo Discussion (Announcements)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      # The tag is the single source of the release version (vX.Y.Z -> X.Y.Z):
+      # it becomes the wheel version, the -X main.version stamped into the
+      # binary, and therefore analyzer.version in every emitted document. There
+      # is no second place to keep in sync -- but the tag must be a version both
+      # PEP 440 and Homebrew accept, so reject anything else before building.
+      - name: Determine and verify version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
+              echo "::error::Tag v$version is not a PEP 440 release version (X.Y.Z, optionally aN/bN/rcN)."
+              exit 1
+            fi
+          else
+            # workflow_dispatch is a dry run: every publishing step below is gated
+            # on refs/tags/, so this version never reaches PyPI or a Release.
+            version="0.0.0.dev0"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo ">>> Releasing version $version"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Download dependencies
+        run: go mod download
+
+      # ----- test gate: a broken build must not produce a release -----
+      # The offline gates only. The parity gate needs a Neo4j service and the
+      # live gate needs a network, Helm and a schema checkout; both run in
+      # ci.yml and live.yml, and neither belongs on the release path.
+      - name: Vet, test and schema drift
+        id: test
+        continue-on-error: true
+        run: |
+          make vet
+          make test
+          make schema-check
+
+      - name: Delete tag on failure
+        if: steps.test.conclusion == 'failure' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "Tests failed. Deleting tag ${GITHUB_REF#refs/tags/}..."
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git push --delete origin "${GITHUB_REF#refs/tags/}"
+          exit 1
+
+      - name: Fail if tests failed (non-tag runs)
+        if: steps.test.conclusion == 'failure'
+        run: exit 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python build tooling
+        # hatchling is the build backend; build_wheels.sh runs `python -m build
+        # --no-isolation`, so it must be present in this env (no auto-install).
+        run: python -m pip install --upgrade build wheel hatchling auditwheel
+
+      - name: Build platform wheels (cross-compiles every target with Go)
+        working-directory: packaging/python
+        env:
+          PKG_VERSION: ${{ steps.ver.outputs.version }}
+        run: ./build_wheels.sh
+
+      # The bundled binaries are statically linked (CGO_ENABLED=0), so the Linux
+      # wheels reference no external shared library at all and `auditwheel repair`
+      # would have nothing to bundle -- the manylinux_2_17 tag build_wheels.sh
+      # applies is already correct, and auditwheel confirms it. `show` is therefore
+      # the check, and it fails the release if a future dependency reintroduces cgo.
+      - name: Check Linux wheels are manylinux-clean
+        working-directory: packaging/python
+        run: |
+          for whl in dist/*manylinux*.whl; do
+            echo "----- auditwheel show $whl"
+            auditwheel show "$whl"
+          done
+
+      # Only the wheel matching the runner (x86-64 Linux) can actually execute, so
+      # it gets the full install-and-run smoke test; the other four are checked
+      # structurally (the platform-tagged binary is present under _bin/).
+      - name: Smoke-test the wheels
+        working-directory: packaging/python
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          host_whl="$(ls dist/*manylinux_2_17_x86_64.whl)"
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install --quiet "$host_whl"
+          got="$("$RUNNER_TEMP/smoke/bin/caniac" --version)"
+          echo ">>> $got"
+          [[ "$got" == "caniac version $VERSION" ]] || {
+            echo "::error::$host_whl reports '$got', expected 'caniac version $VERSION'"; exit 1; }
+          ( cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/smoke/bin/caniac" testdata/helm/profiles \
+              --app-name payments -a 1 --emit json > /dev/null ) \
+            || { echo "::error::the installed binary failed to analyze the fixture chart"; exit 1; }
+          for whl in dist/*.whl; do
+            [[ "$whl" == "$host_whl" ]] && continue
+            echo "----- structure check $whl"
+            unzip -l "$whl" | grep -E 'codeanalyzer_iac/_bin/caniac(\.exe)?$' \
+              || { echo "::error::$whl carries no caniac binary"; exit 1; }
+          done
+
+      - name: Extract raw binaries from wheels (for GitHub Release)
+        working-directory: packaging/python
+        run: |
+          mkdir -p ../../release-bins
+          for whl in dist/*.whl; do
+            plat="$(basename "$whl" .whl | sed 's/.*-py3-none-//')"
+            tmp="$(mktemp -d)"
+            python -m zipfile -e "$whl" "$tmp"
+            bin="$(find "$tmp/codeanalyzer_iac/_bin" -type f -name 'caniac*')"
+            ext=""; [[ "$bin" == *.exe ]] && ext=".exe"
+            cp "$bin" "../../release-bins/caniac-${plat}${ext}"
+          done
+          ls -lh ../../release-bins
+
+      # The Neo4j schema contract is platform-independent and version-locked to this
+      # build: `make schema-check` (the gate above) proves this file is byte-identical
+      # to the copy the binary embeds and emits with `caniac --emit schema`.
+      - name: Stage the Neo4j schema contract (release asset)
+        run: cp schema.neo4j.json release-bins/schema.neo4j.json
+
+      # Publish the cargo-dist-style install script so users can:
+      #   curl --proto '=https' --tlsv1.2 -LsSf .../releases/latest/download/caniac-installer.sh | sh
+      - name: Stage the install script (release asset)
+        run: cp packaging/install/caniac-installer.sh release-bins/caniac-installer.sh
+
+      # One manifest over every asset, so a download can be verified without
+      # trusting the release page. Generated last, so it covers everything.
+      - name: Checksum the release assets
+        working-directory: release-bins
+        run: |
+          sha256sum ./* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Build changelog (auto-generated from commits/PRs)
+        id: changelog
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: mikepenz/release-changelog-builder-action@v5
+        with:
+          configuration: ".github/configuration.json"
+          failOnError: "false"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # cargo-dist-style notes: install one-liners + a download table, then the auto-generated
+      # changelog from the step above (kept). Indented code blocks avoid backticks in the heredoc.
+      - name: Compose release notes
+        id: notes
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          REPO="codellm-devkit/codeanalyzer-iac"
+          BASE="https://github.com/$REPO/releases/download/v$VERSION"
+          cat > "$RUNNER_TEMP/RELEASE_BODY.md" <<EOF
+          ## Install codeanalyzer-iac v$VERSION
+
+          Shell script (prebuilt binary; macOS and Linux):
+
+              curl --proto '=https' --tlsv1.2 -LsSf https://github.com/$REPO/releases/latest/download/caniac-installer.sh | sh
+
+          Homebrew:
+
+              brew install codellm-devkit/tap/codeanalyzer-iac
+
+          PyPI:
+
+              pip install codeanalyzer-iac==$VERSION
+
+          ## Download
+
+          | File | Platform |
+          | --- | --- |
+          | [caniac-macosx_11_0_arm64]($BASE/caniac-macosx_11_0_arm64) | Apple Silicon macOS |
+          | [caniac-macosx_11_0_x86_64]($BASE/caniac-macosx_11_0_x86_64) | Intel macOS |
+          | [caniac-manylinux_2_17_x86_64]($BASE/caniac-manylinux_2_17_x86_64) | x86-64 Linux |
+          | [caniac-manylinux_2_17_aarch64]($BASE/caniac-manylinux_2_17_aarch64) | ARM64 Linux |
+          | [caniac-win_amd64.exe]($BASE/caniac-win_amd64.exe) | x64 Windows |
+          | [caniac-installer.sh]($BASE/caniac-installer.sh) | Shell installer |
+          | [schema.neo4j.json]($BASE/schema.neo4j.json) | Neo4j schema contract |
+          | [SHA256SUMS]($BASE/SHA256SUMS) | Checksums for every asset above |
+
+          ## Changelog
+
+          $CHANGELOG
+          EOF
+          echo "----- composed release body -----"; cat "$RUNNER_TEMP/RELEASE_BODY.md"
+
+      - name: Publish GitHub Release (raw binaries)
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release-bins/*
+          body_path: ${{ runner.temp }}/RELEASE_BODY.md
+          # Auto-open a repo-level Discussion linked to this release, seeded with
+          # the same notes. Requires Discussions enabled and this category to exist.
+          discussion_category_name: Announcements
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Mirror the release announcement into the ORG-level discussions, which are
+      # backed by codellm-devkit/.github. GITHUB_TOKEN can't write cross-repo, so
+      # this uses a PAT/App token (ORG_DISCUSSIONS_TOKEN) with discussions:write
+      # on that repo, and posts via the createDiscussion GraphQL mutation. Reuses
+      # the already-composed RELEASE_BODY.md so org and repo posts stay identical.
+      - name: Announce in org-level discussions (codellm-devkit/.github)
+        if: startsWith(github.ref, 'refs/tags/')
+        continue-on-error: true   # a failed org post must not fail an otherwise-good release
+        env:
+          GH_TOKEN: ${{ secrets.ORG_DISCUSSIONS_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -uo pipefail
+          OWNER="codellm-devkit"; REPO=".github"; CATEGORY="Announcements"
+          # The mutation needs GraphQL node IDs, not names — resolve them first.
+          # The $o/$r/$rid/$cid/$t/$b below are GraphQL variables, not shell ones:
+          # they must reach the server unexpanded, so the single quotes are deliberate.
+          # shellcheck disable=SC2016
+          RESP=$(gh api graphql \
+            -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){id discussionCategories(first:25){nodes{id name}}}}' \
+            -f o="$OWNER" -f r="$REPO") \
+            || { echo "::warning::org discussion lookup failed — skipping org announcement."; exit 0; }
+          REPO_ID=$(echo "$RESP" | jq -r '.data.repository.id')
+          CAT_ID=$(echo "$RESP" | jq -r --arg c "$CATEGORY" '.data.repository.discussionCategories.nodes[]|select(.name==$c)|.id')
+          if [[ -z "$REPO_ID" || "$REPO_ID" == "null" || -z "$CAT_ID" ]]; then
+            echo "::warning::could not resolve $OWNER/$REPO discussion category '$CATEGORY' — skipping org announcement."
+            exit 0
+          fi
+          # shellcheck disable=SC2016
+          gh api graphql \
+            -f query='mutation($rid:ID!,$cid:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$rid,categoryId:$cid,title:$t,body:$b}){discussion{url}}}' \
+            -f rid="$REPO_ID" -f cid="$CAT_ID" \
+            -f t="codeanalyzer-iac v$VERSION" \
+            -f b="$(cat "$RUNNER_TEMP/RELEASE_BODY.md")"
+
+      - name: Publish wheels to PyPI (Trusted Publishing / OIDC)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packaging/python/dist
+          # Make re-runs idempotent: a version already on PyPI is skipped rather
+          # than failing the whole job with a 400 (PyPI rejects duplicate uploads).
+          skip-existing: true
+
+      # Hand the raw binaries to the separate `homebrew` job below. Passing them
+      # as an artifact (rather than re-downloading the GitHub Release) keeps the
+      # formula checksums byte-identical to what was just published.
+      - name: Upload release binaries for the homebrew job
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bins
+          path: release-bins/
+
+  # ----- Homebrew: regenerate the formula from the just-built binaries and push
+  # it to the shared tap. Split into its own job (needs: release) so a tap-push
+  # failure -- e.g. a missing HOMEBREW_TAP_TOKEN -- is isolated from the PyPI and
+  # GitHub Release steps above, and can be re-run on its own without re-uploading
+  # wheels. This is the non-Rust equivalent of what cargo-dist does for you.
+  homebrew:
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Derive version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bins
+          path: release-bins
+
+      - name: Generate Homebrew formula
+        env:
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          ./packaging/homebrew/generate_formula.sh release-bins > codeanalyzer-iac.rb
+          cat codeanalyzer-iac.rb
+
+      - name: Push formula to codellm-devkit/homebrew-tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}   # PAT with write access to homebrew-tap
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/codellm-devkit/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp codeanalyzer-iac.rb tap/Formula/codeanalyzer-iac.rb
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/codeanalyzer-iac.rb
+          git commit -m "codeanalyzer-iac ${VERSION}" || { echo "no formula change"; exit 0; }
+          git push

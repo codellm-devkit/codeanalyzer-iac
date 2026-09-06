@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codeanalyzer-iac"
+dynamic = ["version"]
+description = "Prebuilt codeanalyzer-iac (caniac) backend binary for CLDK (codellm-devkit)."
+# The PyPI long description is the repo root README, copied in by build_wheels.sh at build time
+# (single source of truth; the copy is gitignored). See that script for the cp + cleanup.
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Rahul Krishna", email = "i.m.ralk@gmail.com" },
+]
+keywords = ["cldk", "codellm-devkit", "iac", "helm", "code analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://codellm-devkit.info"
+Repository = "https://github.com/codellm-devkit/codeanalyzer-iac"
+
+# Installs a `caniac` launcher on PATH that exec()s the bundled binary
+# (see src/codeanalyzer_iac/__main__.py). CLDK still locates the binary
+# directly via bin_path(); this is purely for direct shell use. The
+# `codeanalyzer-iac` alias mirrors the name `go install` produces.
+[project.scripts]
+caniac = "codeanalyzer_iac.__main__:main"
+codeanalyzer-iac = "codeanalyzer_iac.__main__:main"
+
+# Single source of truth for the package version: __init__.py's __version__.
+# build_wheels.sh overwrites it from $PKG_VERSION (set to the git tag in CI), so a
+# tag of vX.Y.Z always produces a codeanalyzer-iac==X.Y.Z wheel.
+[tool.hatch.version]
+path = "src/codeanalyzer_iac/__init__.py"
+
+# The compiled binary lives under _bin/ and is gitignored (it is produced per
+# platform at build time). `artifacts` re-includes it in the wheel anyway, so the
+# gitignored binary still ships inside the built wheel.
+[tool.hatch.build.targets.wheel]
+packages = ["src/codeanalyzer_iac"]
+artifacts = ["src/codeanalyzer_iac/_bin/*"]
+
+[tool.hatch.build.targets.sdist]
+# No meaningful sdist: the binary cannot be built without a Go toolchain and the
+# analyzer sources, so we ship platform wheels only. Keep the sdist minimal for
+# metadata completeness.
+include = [
+    "src/codeanalyzer_iac/__init__.py",
+    "README.md",
+    "build_wheels.sh",
+]

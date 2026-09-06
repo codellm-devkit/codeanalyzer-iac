@@ -2,6 +2,15 @@
 /analysis.json
 /graph.cypher
 /coverage.out
+/release-bins/
+
+# Packaging build outputs. The per-platform binary under _bin/ and the README
+# copied in as the wheel's long description are both produced by
+# packaging/python/build_wheels.sh and never committed.
+/packaging/python/dist/
+/packaging/python/README.md
+/packaging/python/src/codeanalyzer_iac/_bin/*
+!/packaging/python/src/codeanalyzer_iac/_bin/.gitignore
 .DS_Store
 
 # SCHEMA_DECISIONS.md is repository content. A global ignore of `.claude`
