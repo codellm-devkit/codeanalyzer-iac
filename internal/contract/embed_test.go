@@ -33,7 +33,7 @@ func TestEmbeddedSchemasMatchRepositoryContracts(t *testing.T) {
 
 // schemaPinSites are every place the accepted schema revision is written down:
 // the CI checkout the live gate runs the semantic checker from, the decision
-// record, and both README mentions. They must all name the same commit — a
+// record in CLAUDE.md, and both README mentions. They must all name the same commit — a
 // stale one silently runs the checker from a catalog that does not know the
 // current edge families.
 var schemaPinSites = []struct {
@@ -41,7 +41,7 @@ var schemaPinSites = []struct {
 	pattern *regexp.Regexp
 }{
 	{".github/workflows/live.yml", regexp.MustCompile("SCHEMA_COMMIT:\\s*([0-9a-f]{40})")},
-	{".claude/SCHEMA_DECISIONS.md", regexp.MustCompile("`codeanalyzer-schema` revision\\s+`([0-9a-f]{40})`")},
+	{"CLAUDE.md", regexp.MustCompile("`codeanalyzer-schema` revision\\s+`([0-9a-f]{40})`")},
 	{"README.md", regexp.MustCompile("\\[`([0-9a-f]{40})`\\]\\(https://github.com/codellm-devkit/codeanalyzer-schema/commit/")},
 	{"README.md", regexp.MustCompile("codeanalyzer-schema/commit/([0-9a-f]{40})")},
 	{"README.md", regexp.MustCompile("checkout at `([0-9a-f]{40})`")},
