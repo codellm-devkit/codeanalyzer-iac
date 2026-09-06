@@ -30,6 +30,10 @@ and value resolution, and rendered Kubernetes desired state. Each level is a str
 one below it, so a consumer can request exactly the depth it needs; the graph projections always
 carry level 3.
 
+The repository pins the accepted `codeanalyzer-schema` contract at
+[`b84428f1accebe2b259d32c15387f04a00167f2c`](https://github.com/codellm-devkit/codeanalyzer-schema/commit/b84428f1accebe2b259d32c15387f04a00167f2c);
+`make schema-check` and the pin-parity test keep every copy of that commit in step.
+
 ## Table of Contents
 
 - [Install](#install)
