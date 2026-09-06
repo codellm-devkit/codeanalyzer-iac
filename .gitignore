@@ -13,9 +13,6 @@
 !/packaging/python/src/codeanalyzer_iac/_bin/.gitignore
 .DS_Store
 
-# SCHEMA_DECISIONS.md is repository content. A global ignore of `.claude`
-# would stop git descending into the directory at all, so the directory is
-# re-included here and everything else inside it stays ignored.
-!.claude/
-.claude/*
-!.claude/SCHEMA_DECISIONS.md
+# CLAUDE.md is repository content (the schema decisions live in it). A global
+# ignore of CLAUDE.md is common, so it is re-included here.
+!CLAUDE.md
