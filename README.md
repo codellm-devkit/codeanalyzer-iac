@@ -7,7 +7,7 @@ is the first dialect; every other file stays an ordinary `Artifact` and is never
 dropped.
 
 The repository pins the accepted `codeanalyzer-schema` contract at
-[`e127901f8ee072d44888f769b35fd5353393c3a3`](https://github.com/codellm-devkit/codeanalyzer-schema/commit/e127901f8ee072d44888f769b35fd5353393c3a3).
+[`b84428f1accebe2b259d32c15387f04a00167f2c`](https://github.com/codellm-devkit/codeanalyzer-schema/commit/b84428f1accebe2b259d32c15387f04a00167f2c).
 The root `schema.json` (2.0.0) and `schema.neo4j.json` (1.0.0) are copied
 byte-for-byte from that revision. Run `make sync-schema` before testing after a
 contract update.
@@ -152,9 +152,9 @@ chart instead: `(:HelmChart)-[:IAC_DECLARES_PROFILE]->(:HelmRenderProfile)`.
 
 | level | adds | never does |
 | --- | --- | --- |
-| L1 | artifact classification, Helm facets, chart metadata, values keys, template definitions/calls/value references, source diagnostics | resolution or rendering |
+| L1 | artifact classification, Helm facets, chart metadata, values keys, template definitions/calls/value references, resource templates, source diagnostics | resolution or rendering |
 | L2 | chart membership, dependency resolution, named-template targets, value-reference targets, unresolved records | rendering or any I/O |
-| L3 | render profiles, value layers, renders, resource templates, rendered Kubernetes resources and addresses | cluster access, install/upgrade, dependency fetching |
+| L3 | render profiles, value layers, renders, rendered Kubernetes resources and addresses | cluster access, install/upgrade, dependency fetching |
 
 `-a/--analysis-level` takes 1, 2 or 3 and defaults to 1. Level 4 is not
 implemented and is rejected. The levels are additive: every fact a lower level
@@ -255,6 +255,18 @@ and source spans; a native or logical address is an `IdentityAlias`, never a
 replacement identity. Aliases never chain: one alias resolves to exactly one
 canonical node.
 
+Every construct L1 records is reachable from the file that declares it, so a
+contained node is never an island — not even when no rendered resource claims it
+as an origin:
+
+| edge | shape |
+| --- | --- |
+| `(:HelmTemplate)-[:IAC_HAS_RESOURCE_TEMPLATE]->(:HelmResourceTemplate)` | one per `resource_templates{}` entry of the template facet |
+| `(:HelmTemplate)-[:IAC_HAS_LOOKUP_REFERENCE]->(:HelmLookupReference)` | one per `lookup_references{}` entry of the template facet |
+| `(:Artifact)-[:IAC_HAS_ALIAS]->(:IaCAlias)` | one per `aliases[]` entry of the owning artifact |
+
+They are identity-only, present from L1 onward, and monotone through L2 and L3.
+
 Every IaC dialect is reachable from one query:
 
 ```cypher
@@ -349,7 +361,8 @@ Cypher, logs — reproduces it.
   resource gets an `IAC_DERIVED_FROM` edge to its source region only when the
   template file has exactly one resource-bearing region. A file with several
   regions — or with a masked conditional — cannot be attributed without
-  rendering the mapping, so no origin is claimed rather than a wrong one.
+  rendering the mapping, so no origin is claimed rather than a wrong one. Such a
+  region is still reachable through `IAC_HAS_RESOURCE_TEMPLATE` from its file.
 - **`plural` is only emitted for built-in kinds.** The resource plural comes
   from the compiled client-go scheme. A custom resource, including one whose CRD
   is in the same chart, carries an empty plural rather than a guess.
@@ -456,7 +469,7 @@ make test-live-head  # the declared default branches, for upstream drift
 |---|---|
 | network access to `github.com` | the repositories are cloned per test into `t.TempDir()` |
 | `helm` **v4.2.4** exactly | the independent render oracle; any other version fails the gate |
-| `python3` and `CANIAC_SCHEMA_REPO` | runs `scripts/check_iac.py` from a [`codeanalyzer-schema`](https://github.com/codellm-devkit/codeanalyzer-schema) checkout at `e127901f8ee072d44888f769b35fd5353393c3a3`. There is no default path: unset or absent, the semantic check is skipped with a message locally and fails in CI (`CI` set). |
+| `python3` and `CANIAC_SCHEMA_REPO` | runs `scripts/check_iac.py` from a [`codeanalyzer-schema`](https://github.com/codellm-devkit/codeanalyzer-schema) checkout at `b84428f1accebe2b259d32c15387f04a00167f2c`. There is no default path: unset or absent, the semantic check is skipped with a message locally and fails in CI (`CI` set). |
 | a disposable Neo4j 5.x | `NEO4J_TEST_URI`, `NEO4J_TEST_USERNAME`, `NEO4J_TEST_PASSWORD`, optional `NEO4J_TEST_DATABASE`. Absent, the graph parity gate is skipped locally and fails in CI (`CI` set). |
 
 ```sh

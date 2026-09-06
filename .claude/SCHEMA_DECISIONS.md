@@ -1,7 +1,7 @@
 # IaC schema decisions
 
 This analyzer pins the accepted `codeanalyzer-schema` revision
-`e127901f8ee072d44888f769b35fd5353393c3a3`.
+`b84428f1accebe2b259d32c15387f04a00167f2c`.
 
 - The analysis envelope is schema version `2.0.0`; the Neo4j graph catalog is
   schema version `1.0.0`.
@@ -56,3 +56,28 @@ is a place the schema decided the shape and the implementation complied.
   between builds; persisting it would make the emitted model depend on how the
   analyzer was compiled. The pinned renderer supplies its own defaults at render
   time.
+
+## Decisions taken with the containment edges (schema `b84428f`)
+
+Recorded from the accepted spec `2026-09-05-iac-containment-edges` (D1-D4).
+
+- **D1: per-kind edge names.** `IAC_HAS_RESOURCE_TEMPLATE`,
+  `IAC_HAS_LOOKUP_REFERENCE` and `IAC_HAS_ALIAS` rather than one generic
+  `IAC_CONTAINS`. A single type would need fewer entries but would break the
+  per-child pattern every other containment edge follows and would make the
+  counterpart check label-dependent.
+- **D2: aliases are contained too.** `IAC_HAS_ALIAS` is included so every owned
+  contained node has an inbound edge from its owner. Emitting only the two
+  template edges would close the observed islands but leave an `IaCAlias`
+  reachable only from itself.
+- **D3: the catalog `schema_version` stays 1.0.0.** The addition is purely
+  additive, this analyzer pins by commit and byte-compares the catalog, and no
+  consumer reads the version field yet.
+- **D4: the change lands before `v0.1.0`.** No release exists yet, so there is
+  nothing to ship the additive edges in as a patch.
+
+Consequences in this repository: containment is emitted at L1 next to
+`iac_has_value_reference` and the chart alias, `internal/model/validate.go`
+enforces exactly one edge per nested child, and the Neo4j projector needed no
+change because its allowlist and endpoint families are parsed from the embedded
+catalog.

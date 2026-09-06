@@ -326,6 +326,30 @@ func TestTemplateParsingIsDeterministicAndRaceSafe(t *testing.T) {
 	}
 }
 
+// TestTemplateL1EmitsOneContainmentEdgePerNestedChild is the graph counterpart
+// of the nesting in analysis.json: every resource template and lookup
+// reference under the facet is reachable from the template file at L1.
+func TestTemplateL1EmitsOneContainmentEdgePerNestedChild(t *testing.T) {
+	artifact := fixtureArtifact(t, "l1-v2/templates/deployment.yaml", "charts/sample/templates/deployment.yaml")
+	app := parseAndValidate(t, artifact, dialect.Detection{Dialect: "helm", Kind: "helm_template", Roles: []string{"resource"}})
+	facet := app.Artifacts[artifact.Path].IaC.(*model.HelmTemplate)
+	if len(facet.ResourceTemplates) == 0 || len(facet.LookupReferences) == 0 {
+		t.Fatalf("fixture has no nested children: resources=%d lookups=%d", len(facet.ResourceTemplates), len(facet.LookupReferences))
+	}
+	for _, resource := range facet.ResourceTemplates {
+		assertEdge(t, app, model.IaCHasResourceTemplate, artifact.ID, resource.ID)
+	}
+	for _, lookup := range facet.LookupReferences {
+		assertEdge(t, app, model.IaCHasLookupReference, artifact.ID, lookup.ID)
+	}
+	if got := len(app.Edges[model.IaCHasResourceTemplate]); got != len(facet.ResourceTemplates) {
+		t.Fatalf("iac_has_resource_template edges = %d, want %d", got, len(facet.ResourceTemplates))
+	}
+	if got := len(app.Edges[model.IaCHasLookupReference]); got != len(facet.LookupReferences) {
+		t.Fatalf("iac_has_lookup_reference edges = %d, want %d", got, len(facet.LookupReferences))
+	}
+}
+
 func TestTemplateFrontendHonorsCanceledContext(t *testing.T) {
 	artifact := fixtureArtifact(t, "l1-v2/templates/deployment.yaml", "charts/sample/templates/deployment.yaml")
 	ctx, cancel := context.WithCancel(context.Background())

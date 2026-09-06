@@ -51,6 +51,8 @@
     {"type": "IAC_CALLS_TEMPLATE", "from": ["HelmTemplateCall"], "to": ["HelmNamedTemplate"], "properties": {}},
     {"type": "IAC_HAS_VALUE_REFERENCE", "from": ["HelmTemplate"], "to": ["HelmValueReference"], "properties": {}},
     {"type": "IAC_REFERENCES_VALUE", "from": ["HelmValueReference"], "to": ["HelmValue"], "properties": {}},
+    {"type": "IAC_HAS_RESOURCE_TEMPLATE", "from": ["HelmTemplate"], "to": ["HelmResourceTemplate"], "properties": {}},
+    {"type": "IAC_HAS_LOOKUP_REFERENCE", "from": ["HelmTemplate"], "to": ["HelmLookupReference"], "properties": {}},
     {"type": "IAC_DECLARES_PROFILE", "from": ["CodeAnalyzerIaCConfig", "HelmChart"], "to": ["HelmRenderProfile"], "properties": {}},
     {"type": "IAC_RENDERS_CHART", "from": ["HelmRenderProfile"], "to": ["HelmChart"], "properties": {}},
     {"type": "IAC_HAS_VALUE_LAYER", "from": ["HelmRenderProfile"], "to": ["HelmValueLayer"], "properties": {}},
@@ -61,6 +63,7 @@
     {"type": "IAC_PRODUCES", "from": ["HelmRender"], "to": ["KubernetesResource"], "properties": {}},
     {"type": "IAC_TARGETS_RESOURCE", "from": ["KubernetesResource"], "to": ["KubernetesResourceAddress"], "properties": {}},
     {"type": "IAC_DERIVED_FROM", "from": ["KubernetesResource"], "to": ["HelmResourceTemplate"], "properties": {}},
+    {"type": "IAC_HAS_ALIAS", "from": ["Artifact"], "to": ["IaCAlias"], "properties": {}},
     {"type": "IAC_ALIAS_OF", "from": ["IaCAlias"], "to": ["Artifact", "KubernetesResourceAddress"], "properties": {}}
   ],
   "constraints": [

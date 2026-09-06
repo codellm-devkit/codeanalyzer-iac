@@ -870,6 +870,11 @@ type artifactRecord struct {
 	SizeBytes int64         `json:"size_bytes"`
 	IaC       *facetRecord  `json:"iac"`
 	Config    *configRecord `json:"codeanalyzer_iac_config"`
+	Aliases   []aliasRecord `json:"aliases"`
+}
+
+type aliasRecord struct {
+	ID string `json:"id"`
 }
 
 type facetRecord struct {

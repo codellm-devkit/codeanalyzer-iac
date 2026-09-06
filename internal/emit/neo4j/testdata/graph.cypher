@@ -282,6 +282,13 @@ MATCH (t:HelmResourceTemplate {id: row.dst})
 MERGE (s)-[:IAC_DERIVED_FROM]->(t)
 ;
 
+:param edges_IAC_HAS_ALIAS_Artifact_IdentityAlias => [{dst: 'can://iac/payments/helm/chart/charts%2Fapi', src: 'can://artifact/payments/charts/api/Chart.yaml'}, {dst: 'can://iac/payments/helm/address/core/Secret/prod/api', src: 'can://artifact/payments/charts/api/templates/deployment.yaml'}];
+UNWIND $edges_IAC_HAS_ALIAS_Artifact_IdentityAlias AS row
+MATCH (s:Artifact {id: row.src})
+MATCH (t:IdentityAlias {id: row.dst})
+MERGE (s)-[:IAC_HAS_ALIAS]->(t)
+;
+
 :param edges_IAC_HAS_DIAGNOSTIC_Artifact_IaCDiagnostic => [{dst: 'can://iac/payments/helm/diagnostic/IAC_HELM_UNRESOLVED_VALUE/image.tag', src: 'can://artifact/payments/charts/api/templates/deployment.yaml'}];
 UNWIND $edges_IAC_HAS_DIAGNOSTIC_Artifact_IaCDiagnostic AS row
 MATCH (s:Artifact {id: row.src})
@@ -296,11 +303,25 @@ MATCH (t:IaCDiagnostic {id: row.dst})
 MERGE (s)-[:IAC_HAS_DIAGNOSTIC]->(t)
 ;
 
+:param edges_IAC_HAS_LOOKUP_REFERENCE_Artifact_HelmLookupReference => [{dst: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/lookup-reference@1:3', src: 'can://artifact/payments/charts/api/templates/deployment.yaml'}];
+UNWIND $edges_IAC_HAS_LOOKUP_REFERENCE_Artifact_HelmLookupReference AS row
+MATCH (s:Artifact {id: row.src})
+MATCH (t:HelmLookupReference {id: row.dst})
+MERGE (s)-[:IAC_HAS_LOOKUP_REFERENCE]->(t)
+;
+
 :param edges_IAC_HAS_RENDER_Artifact_HelmRender => [{dst: 'can://iac/payments/helm/chart/charts%2Fapi/render/production@f00d', src: 'can://artifact/payments/charts/api/Chart.yaml'}];
 UNWIND $edges_IAC_HAS_RENDER_Artifact_HelmRender AS row
 MATCH (s:Artifact {id: row.src})
 MATCH (t:HelmRender {id: row.dst})
 MERGE (s)-[:IAC_HAS_RENDER]->(t)
+;
+
+:param edges_IAC_HAS_RESOURCE_TEMPLATE_Artifact_HelmResourceTemplate => [{dst: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/resource-template@1:1', src: 'can://artifact/payments/charts/api/templates/deployment.yaml'}];
+UNWIND $edges_IAC_HAS_RESOURCE_TEMPLATE_Artifact_HelmResourceTemplate AS row
+MATCH (s:Artifact {id: row.src})
+MATCH (t:HelmResourceTemplate {id: row.dst})
+MERGE (s)-[:IAC_HAS_RESOURCE_TEMPLATE]->(t)
 ;
 
 :param edges_IAC_HAS_TEMPLATE_CALL_Artifact_HelmTemplateCall => [{dst: 'can://iac/payments/helm/charts%2Fapi%2Ftemplates%2Fdeployment.yaml/template-call@1:1', src: 'can://artifact/payments/charts/api/templates/deployment.yaml'}];

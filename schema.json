@@ -509,6 +509,8 @@
         "iac_calls_template": {"$ref": "#/$defs/EdgeMap"},
         "iac_has_value_reference": {"$ref": "#/$defs/EdgeMap"},
         "iac_references_value": {"$ref": "#/$defs/EdgeMap"},
+        "iac_has_resource_template": {"$ref": "#/$defs/EdgeMap"},
+        "iac_has_lookup_reference": {"$ref": "#/$defs/EdgeMap"},
         "iac_declares_profile": {"$ref": "#/$defs/EdgeMap"},
         "iac_renders_chart": {"$ref": "#/$defs/EdgeMap"},
         "iac_has_value_layer": {"$ref": "#/$defs/EdgeMap"},
@@ -519,6 +521,7 @@
         "iac_produces": {"$ref": "#/$defs/EdgeMap"},
         "iac_targets_resource": {"$ref": "#/$defs/EdgeMap"},
         "iac_derived_from": {"$ref": "#/$defs/EdgeMap"},
+        "iac_has_alias": {"$ref": "#/$defs/EdgeMap"},
         "iac_alias_of": {"$ref": "#/$defs/EdgeMap"}
       }
     },

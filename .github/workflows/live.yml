@@ -16,7 +16,7 @@ permissions:
 env:
   HELM_VERSION: v4.2.4
   SCHEMA_REPOSITORY: codellm-devkit/codeanalyzer-schema
-  SCHEMA_COMMIT: e127901f8ee072d44888f769b35fd5353393c3a3
+  SCHEMA_COMMIT: b84428f1accebe2b259d32c15387f04a00167f2c
 
 jobs:
   pinned:

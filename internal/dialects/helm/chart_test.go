@@ -66,6 +66,7 @@ func TestChartV2ParsesExactMetadataDependencyAliasAndSpans(t *testing.T) {
 		t.Fatalf("aliases = %#v, want %#v", app.Artifacts[artifact.Path].Aliases, want)
 	}
 	assertEdge(t, app, model.IaCAliasOf, aliasID, artifact.ID)
+	assertEdge(t, app, model.IaCHasAlias, artifact.ID, aliasID)
 	assertEdge(t, app, model.IaCDeclaresDependency, artifact.ID, dependency.ID)
 	if len(app.Packages) != 0 || len(app.ExternalChartReferences) != 0 {
 		t.Fatalf("L1 invented resolution facts: packages=%#v references=%#v", app.Packages, app.ExternalChartReferences)
@@ -102,6 +103,10 @@ func TestRootChartAliasOmitsDotDirectorySegment(t *testing.T) {
 		t.Fatalf("root chart aliases = %#v, want %#v", app.Artifacts[artifact.Path].Aliases, want)
 	}
 	assertEdge(t, app, model.IaCAliasOf, aliasID, artifact.ID)
+	assertEdge(t, app, model.IaCHasAlias, artifact.ID, aliasID)
+	if got := len(app.Edges[model.IaCHasAlias]); got != 1 {
+		t.Fatalf("iac_has_alias edges = %d, want one per alias", got)
+	}
 }
 
 func TestLockParsesTypedSnapshotsWithoutInventingHelmPURL(t *testing.T) {
