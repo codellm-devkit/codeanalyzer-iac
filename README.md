@@ -12,7 +12,26 @@ The root `schema.json` (2.0.0) and `schema.neo4j.json` (1.0.0) are copied
 byte-for-byte from that revision. Run `make sync-schema` before testing after a
 contract update.
 
-## Install and build
+## Install
+
+Every release publishes the same self-contained `caniac` binary three ways. It
+has no runtime dependency of any kind.
+
+```sh
+pip install codeanalyzer-iac          # the platform wheel; puts `caniac` on PATH
+brew install codellm-devkit/tap/codeanalyzer-iac
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/codellm-devkit/codeanalyzer-iac/releases/latest/download/caniac-installer.sh | sh
+```
+
+The PyPI package is the one CLDK's Python SDK depends on:
+`codeanalyzer_iac.bin_path()` returns the bundled executable. The raw
+per-platform binaries, a `SHA256SUMS` manifest and the version-locked
+`schema.neo4j.json` are also attached to each [GitHub
+Release](https://github.com/codellm-devkit/codeanalyzer-iac/releases) for direct
+download.
+
+## Build
 
 ```sh
 make build                 # -o caniac, version stamped from VERSION (0.1.0-dev)
@@ -31,6 +50,23 @@ The command calls itself `caniac` in its own usage; `go install` produces a
 binary named `codeanalyzer-iac`, and the two behave identically. Building needs
 the Go version declared in `go.mod` and nothing else. Running needs nothing at
 all: the Helm renderer is the pinned `helm.sh/helm/v4` SDK, compiled in.
+
+Nothing in the dependency tree needs cgo, so one host cross-compiles every
+released target — `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`
+and `windows/amd64` — with `CGO_ENABLED=0` and the stock toolchain. That is why
+the release pipeline is a single job and why the Linux binaries are static
+enough to carry a `manylinux_2_17` wheel tag. `make wheels VERSION=X.Y.Z`
+reproduces all five wheels locally.
+
+One version reaches every artifact: the git tag `vX.Y.Z` is the only source, and
+it becomes `codeanalyzer_iac.__version__`, the `-X main.version` linker stamp,
+what `caniac --version` prints, and `analyzer.version` in every emitted analysis
+document. The release workflow fails before publishing if they disagree.
+
+The tag must be an already normalized PEP 440 release version — `v0.1.0` or
+`v0.1.0rc1`, never `v0.1.0-rc1` or `v0.1.0-dev`. The workflow rejects anything
+else before it builds, and `make wheels` applies the same rule to `VERSION`, so
+the wheel filename, the Homebrew `version` field and the tag cannot drift apart.
 
 ## Filesystem analysis
 
@@ -434,6 +470,7 @@ make test          # go test ./... — offline, no cluster, no database required
 make race          # go test -race ./...
 make schema-check  # contract files, embedded copies and generated catalog agree
 make fuzz-smoke    # 10s over each parser fuzz target
+make wheels VERSION=0.1.0rc0   # the five platform wheels the release publishes
 ```
 
 `go test ./...` is network-independent and needs no services. The graph parity
