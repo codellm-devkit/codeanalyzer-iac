@@ -200,13 +200,17 @@ func (s *BoltStore) WriteGeneration(ctx context.Context, plan Plan) error {
 
 // createConstraints applies the catalog's schema statements in their own
 // session, because Neo4j refuses to mix schema and data in one transaction.
+// Each statement gets its own managed transaction, so the driver retries the
+// retryable errors — a deadlock between two writers creating the same
+// `IF NOT EXISTS` constraint at once — with backoff instead of ending the
+// generation. The statements are idempotent, so a retried attempt is safe.
 //
-// A constraint failure is fatal to the generation rather than a warning: the
-// uniqueness constraints are what make MERGE-by-id idempotent, and a shared
-// graph really can refuse one (duplicate ids on a constrained label). Both the
-// acknowledgement of RUN and the completion of the statement are checked, and
-// the session's own close error is reported rather than dropped, so no failure
-// can be lost between the two.
+// A constraint failure that is not retryable stays fatal to the generation
+// rather than a warning: the uniqueness constraints are what make MERGE-by-id
+// idempotent, and a shared graph really can refuse one (duplicate ids on a
+// constrained label). Both the acknowledgement of RUN and the completion of the
+// statement are checked, and the session's own close error is reported rather
+// than dropped, so no failure can be lost between the two.
 func (s *BoltStore) createConstraints(ctx context.Context, constraints []string) (err error) {
 	session := s.session(ctx, neo4j.AccessModeWrite)
 	defer func() {
@@ -215,12 +219,14 @@ func (s *BoltStore) createConstraints(ctx context.Context, constraints []string)
 		}
 	}()
 	for _, constraint := range constraints {
-		result, runErr := session.Run(ctx, constraint, nil)
-		if runErr != nil {
-			return fmt.Errorf("create constraint: %w", runErr)
-		}
-		if _, consumeErr := result.Consume(ctx); consumeErr != nil {
-			return fmt.Errorf("create constraint: %w", consumeErr)
+		if _, writeErr := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			result, runErr := tx.Run(ctx, constraint, nil)
+			if runErr != nil {
+				return nil, runErr
+			}
+			return result.Consume(ctx)
+		}); writeErr != nil {
+			return fmt.Errorf("create constraint: %w", writeErr)
 		}
 	}
 	return nil
