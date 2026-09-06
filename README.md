@@ -1,11 +1,63 @@
-# codeanalyzer-iac
+<div align="center">
 
-`codeanalyzer-iac` is the CLDK infrastructure-as-code analyzer backend. It reads
-a repository (or a graph that already holds one) and publishes one typed model
-of its infrastructure sources as JSON and as a matching Neo4j projection. Helm
-is the first dialect; every other file stays an ordinary `Artifact` and is never
-dropped.
+<img src="https://github.com/codellm-devkit/codeanalyzer-iac/blob/main/docs/assets/logo.png?raw=true" alt="CodeLLM-DevKit" />
 
+# codeanalyzer-iac (`caniac`)
+
+**An infrastructure-as-code static-analysis toolkit — the CLDK backend that turns Helm charts into the canonical schema v2 IaC model, as `analysis.json` or a Neo4j property graph.**
+
+[![PyPI](https://img.shields.io/pypi/v/codeanalyzer-iac?style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/codeanalyzer-iac/)
+[![GitHub release](https://img.shields.io/github/v/release/codellm-devkit/codeanalyzer-iac?style=for-the-badge&logo=github&label=GitHub&color=2dba4e)](https://github.com/codellm-devkit/codeanalyzer-iac/releases/latest)
+[![Release](https://img.shields.io/github/actions/workflow/status/codellm-devkit/codeanalyzer-iac/release.yml?style=for-the-badge&label=release&logo=githubactions&logoColor=white)](https://github.com/codellm-devkit/codeanalyzer-iac/actions/workflows/release.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge)](./LICENSE)
+
+</div>
+
+---
+
+`caniac` is a static analyzer for infrastructure-as-code built on the
+[Helm](https://helm.sh/) SDK (pinned to 4.2.4, never the `helm` CLI). It reads a repository — or a
+Neo4j graph that already holds one — and publishes one typed model of its infrastructure sources
+as `analysis.json` and as a matching **Neo4j property graph**. It is the IaC backend behind
+[CLDK](https://github.com/codellm-devkit/python-sdk), a sibling of the
+[Python](https://github.com/codellm-devkit/codeanalyzer-python) (`canpy`),
+[TypeScript](https://github.com/codellm-devkit/codeanalyzer-typescript) (`cants`) and
+[Java](https://github.com/codellm-devkit/codeanalyzer-java) analyzers. Helm is the first dialect;
+every other file stays an ordinary `Artifact` and is never dropped.
+
+The model grows one layer at a time across three analysis levels (`-a 1|2|3`): source facts, chart
+and value resolution, and rendered Kubernetes desired state. Each level is a strict superset of the
+one below it, so a consumer can request exactly the depth it needs; the graph projections always
+carry level 3.
+
+The repository pins the accepted `codeanalyzer-schema` contract at
+[`b84428f1accebe2b259d32c15387f04a00167f2c`](https://github.com/codellm-devkit/codeanalyzer-schema/commit/b84428f1accebe2b259d32c15387f04a00167f2c);
+`make schema-check` and the pin-parity test keep every copy of that commit in step.
+
+## Table of Contents
+
+- [Install](#install)
+- [Build](#build)
+- [Filesystem analysis](#filesystem-analysis)
+- [Graph enrichment](#graph-enrichment)
+- [Typed render configuration](#typed-render-configuration)
+- [Analysis levels](#analysis-levels)
+- [Output modes and exit channels](#output-modes-and-exit-channels)
+  - [Credentials](#credentials)
+- [Progressive Artifact facets](#progressive-artifact-facets)
+- [What the analyzer never does](#what-the-analyzer-never-does)
+  - [Secret-derived data](#secret-derived-data)
+- [Helm support matrix](#helm-support-matrix)
+- [Known limitations in 0.1.0](#known-limitations-in-010)
+- [Explicitly not in scope](#explicitly-not-in-scope)
+- [Future dialects](#future-dialects)
+- [Development gates](#development-gates)
+- [Live acceptance gate](#live-acceptance-gate)
+  - [Prerequisites](#prerequisites)
+  - [The pinned repositories](#the-pinned-repositories)
+  - [Expected semantics](#expected-semantics)
+  - [When upstream changes](#when-upstream-changes)
+- [License](#license)
 
 ## Install
 
@@ -578,3 +630,7 @@ never rewrites an expectation. An upstream change is adopted only by review:
 3. If it is, update `tests/live/repositories.json` and the affected assertions
    in the same pull request, with the upstream diff cited in the description.
 4. If it is not, leave the pin alone and open an upstream issue.
+
+## License
+
+Apache 2.0 — see [LICENSE](./LICENSE).
