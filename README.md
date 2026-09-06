@@ -14,23 +14,18 @@ contract update.
 
 ## Install
 
-Every release publishes the same self-contained `caniac` binary three ways. It
-has no runtime dependency of any kind.
+Shell script (prebuilt binary; macOS and Linux):
 
-```sh
-pip install codeanalyzer-iac          # the platform wheel; puts `caniac` on PATH
-brew install codellm-devkit/tap/codeanalyzer-iac
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/codellm-devkit/codeanalyzer-iac/releases/latest/download/caniac-installer.sh | sh
-```
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/codellm-devkit/codeanalyzer-iac/releases/latest/download/caniac-installer.sh | sh
 
-The PyPI package is the one CLDK's Python SDK depends on:
-`codeanalyzer_iac.bin_path()` returns the bundled executable. The raw
-per-platform binaries, a `SHA256SUMS` manifest and the version-locked
-`schema.neo4j.json` are also attached to each [GitHub
-Release](https://github.com/codellm-devkit/codeanalyzer-iac/releases) for direct
-download.
+Homebrew:
 
+    brew install codellm-devkit/tap/codeanalyzer-iac
+
+PyPI:
+
+    pip install codeanalyzer-iac
+    
 ## Build
 
 ```sh
