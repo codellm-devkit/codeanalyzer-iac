@@ -586,10 +586,10 @@ func TestTemplateParsingScalesNearLinearly(t *testing.T) {
 		return duration
 	}
 
-	small := measure(10_000)
-	large := measure(40_000)
+	small := measure(22_000)
+	large := measure(88_000)
 	if limit := small*8 + 25*time.Millisecond; large > limit {
-		t.Fatalf("40k actions took %s after 10k took %s; want <= %s", large, small, limit)
+		t.Fatalf("88k actions took %s after 22k took %s; want <= %s", large, small, limit)
 	}
 }
 
@@ -612,13 +612,13 @@ func TestTemplateDenseSingleLineParsingScalesNearLinearly(t *testing.T) {
 		return best
 	}
 
-	small := measure(2_000)
-	large := measure(8_000)
+	small := measure(24_000)
+	large := measure(96_000)
 	if limit := small*9 + 50*time.Millisecond; large > limit {
-		t.Fatalf("8k dense same-line actions took %s after 2k took %s; want <= %s", large, small, limit)
+		t.Fatalf("96k dense same-line actions took %s after 24k took %s; want <= %s", large, small, limit)
 	}
 	if large > 5*time.Second {
-		t.Fatalf("8k dense same-line actions took %s; want <= 5s", large)
+		t.Fatalf("96k dense same-line actions took %s; want <= 5s", large)
 	}
 }
 
